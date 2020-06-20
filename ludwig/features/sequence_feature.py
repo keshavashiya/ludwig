@@ -34,7 +34,8 @@ from ludwig.models.modules.measure_modules import masked_accuracy
 from ludwig.models.modules.measure_modules import perplexity
 from ludwig.models.modules.sequence_decoders import Generator
 from ludwig.models.modules.sequence_decoders import Tagger
-from ludwig.models.modules.sequence_encoders import CNNRNN
+from ludwig.models.modules.sequence_encoders import BERT
+from ludwig.models.modules.sequence_encoders import CNNRNN, PassthroughEncoder
 from ludwig.models.modules.sequence_encoders import EmbedEncoder
 from ludwig.models.modules.sequence_encoders import ParallelCNN
 from ludwig.models.modules.sequence_encoders import RNN
@@ -49,6 +50,8 @@ from ludwig.utils.strings_utils import UNKNOWN_SYMBOL
 from ludwig.utils.strings_utils import build_sequence_matrix
 from ludwig.utils.strings_utils import create_vocabulary
 
+logger = logging.getLogger(__name__)
+
 
 class SequenceBaseFeature(BaseFeature):
     def __init__(self, feature):
@@ -61,18 +64,22 @@ class SequenceBaseFeature(BaseFeature):
         'padding_symbol': PADDING_SYMBOL,
         'unknown_symbol': UNKNOWN_SYMBOL,
         'padding': 'right',
-        'format': 'space',
+        'tokenizer': 'space',
         'lowercase': False,
+        'vocab_file': None,
         'missing_value_strategy': FILL_WITH_CONST,
-        'fill_value': ''
+        'fill_value': UNKNOWN_SYMBOL
     }
 
     @staticmethod
     def get_feature_meta(column, preprocessing_parameters):
         idx2str, str2idx, str2freq, max_length = create_vocabulary(
-            column, preprocessing_parameters['format'],
+            column, preprocessing_parameters['tokenizer'],
             lowercase=preprocessing_parameters['lowercase'],
-            num_most_frequent=preprocessing_parameters['most_common']
+            num_most_frequent=preprocessing_parameters['most_common'],
+            vocab_file=preprocessing_parameters['vocab_file'],
+            unknown_symbol=preprocessing_parameters['unknown_symbol'],
+            padding_symbol=preprocessing_parameters['padding_symbol'],
         )
         max_length = min(
             preprocessing_parameters['sequence_length_limit'],
@@ -89,12 +96,17 @@ class SequenceBaseFeature(BaseFeature):
     @staticmethod
     def feature_data(column, metadata, preprocessing_parameters):
         sequence_data = build_sequence_matrix(
-            column, metadata['str2idx'],
-            preprocessing_parameters['format'],
-            metadata['max_sequence_length'],
-            preprocessing_parameters['padding_symbol'],
-            preprocessing_parameters['padding'],
-            preprocessing_parameters['lowercase']
+            sequences=column,
+            inverse_vocabulary=metadata['str2idx'],
+            tokenizer_type=preprocessing_parameters['tokenizer'],
+            length_limit=metadata['max_sequence_length'],
+            padding_symbol=preprocessing_parameters['padding_symbol'],
+            padding=preprocessing_parameters['padding'],
+            unknown_symbol=preprocessing_parameters['unknown_symbol'],
+            lowercase=preprocessing_parameters['lowercase'],
+            tokenizer_vocab_file=preprocessing_parameters[
+                'vocab_file'
+            ],
         )
         return sequence_data
 
@@ -102,7 +114,8 @@ class SequenceBaseFeature(BaseFeature):
     def add_feature_data(
             feature,
             dataset_df,
-            data, metadata,
+            data,
+            metadata,
             preprocessing_parameters
     ):
         sequence_data = SequenceInputFeature.feature_data(
@@ -130,7 +143,7 @@ class SequenceInputFeature(SequenceBaseFeature, InputFeature):
 
     def _get_input_placeholder(self):
         # None dimension is for dealing with variable batch size
-        return tf.placeholder(
+        return tf.compat.v1.placeholder(
             tf.int32,
             shape=[None, None],
             name='{}_placeholder'.format(self.name)
@@ -144,7 +157,7 @@ class SequenceInputFeature(SequenceBaseFeature, InputFeature):
             **kwargs
     ):
         placeholder = self._get_input_placeholder()
-        logging.debug('  placeholder: {0}'.format(placeholder))
+        logger.debug('  placeholder: {0}'.format(placeholder))
 
         return self.build_sequence_input(
             placeholder,
@@ -168,7 +181,7 @@ class SequenceInputFeature(SequenceBaseFeature, InputFeature):
             dropout_rate=dropout_rate,
             is_training=is_training
         )
-        logging.debug('  feature_representation: {0}'.format(
+        logger.debug('  feature_representation: {0}'.format(
             feature_representation))
 
         feature_representation = {
@@ -211,12 +224,12 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
             'class_weights': 1,
             'robust_lambda': 0,
             'confidence_penalty': 0,
-            'class_distance_temperature': 0,
+            'class_similarities_temperature': 0,
             'weight': 1
         }
         self.num_classes = 0
 
-        a = self.overwrite_defaults(feature)
+        _ = self.overwrite_defaults(feature)
 
         self.decoder_obj = self.get_sequence_decoder(feature)
 
@@ -228,7 +241,7 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
 
     def _get_output_placeholder(self):
         # None dimension is for dealing with variable batch size
-        return tf.placeholder(
+        return tf.compat.v1.placeholder(
             tf.int32,
             [None, self.max_sequence_length],
             name='{}_placeholder'.format(self.name)
@@ -239,6 +252,8 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
             hidden,
             hidden_size,
             regularizer=None,
+            dropout_rate=None,
+            is_training=None,
             **kwargs
     ):
         train_mean_loss, eval_loss, output_tensors = self.build_sequence_output(
@@ -302,12 +317,15 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
         output_tensors[TRAIN_MEAN_LOSS + '_' + feature_name] = train_mean_loss
         output_tensors[EVAL_LOSS + '_' + feature_name] = eval_loss
 
-        tf.summary.scalar(TRAIN_MEAN_LOSS + '_' + feature_name, train_mean_loss)
+        tf.compat.v1.summary.scalar(
+            'batch_train_mean_loss_{}'.format(self.name),
+            train_mean_loss,
+        )
 
         # ================ Measures ================
         (
             correct_last_predictions, last_accuracy,
-            correct_overall_predictions, overall_accuracy,
+            correct_overall_predictions, token_accuracy,
             correct_rowwise_predictions, rowwise_accuracy, edit_distance_val,
             mean_edit_distance, perplexity_val
         ) = self.sequence_measures(
@@ -327,7 +345,7 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
         output_tensors[
             CORRECT_OVERALL_PREDICTIONS + '_' + feature_name
             ] = correct_overall_predictions
-        output_tensors[OVERALL_ACCURACY + '_' + feature_name] = overall_accuracy
+        output_tensors[TOKEN_ACCURACY + '_' + feature_name] = token_accuracy
         output_tensors[
             CORRECT_ROWWISE_PREDICTIONS + '_' + feature_name
             ] = correct_rowwise_predictions
@@ -336,20 +354,20 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
         output_tensors[PERPLEXITY + '_' + feature_name] = perplexity_val
 
         if 'sampled' not in self.loss['type']:
-            tf.summary.scalar(
-                'train_batch_last_accuracy_{}'.format(feature_name),
+            tf.compat.v1.summary.scalar(
+                'batch_train_last_accuracy_{}'.format(feature_name),
                 last_accuracy
             )
-            tf.summary.scalar(
-                'train_batch_overall_accuracy_{}'.format(feature_name),
-                overall_accuracy
+            tf.compat.v1.summary.scalar(
+                'batch_train_token_accuracy_{}'.format(feature_name),
+                token_accuracy
             )
-            tf.summary.scalar(
-                'train_batch_rowwise_accuracy_{}'.format(feature_name),
+            tf.compat.v1.summary.scalar(
+                'batch_train_rowwise_accuracy_{}'.format(feature_name),
                 rowwise_accuracy
             )
-            tf.summary.scalar(
-                'train_batch_mean_edit_distance_{}'.format(feature_name),
+            tf.compat.v1.summary.scalar(
+                'batch_train_mean_edit_distance_{}'.format(feature_name),
                 mean_edit_distance
             )
 
@@ -364,7 +382,7 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
             regularizer=None,
             is_timeseries=False
     ):
-        with tf.variable_scope('predictions_{}'.format(self.name)):
+        with tf.compat.v1.variable_scope('predictions_{}'.format(self.name)):
             decoder_output = decoder(
                 dict(self.__dict__),
                 targets,
@@ -432,9 +450,9 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
             last_predictions,
             eval_loss
     ):
-        with tf.variable_scope('measures_{}'.format(self.name)):
+        with tf.compat.v1.variable_scope('measures_{}'.format(self.name)):
             (
-                overall_accuracy_val,
+                token_accuracy_val,
                 overall_correct_predictions,
                 rowwise_accuracy_val,
                 rowwise_correct_predictions
@@ -462,7 +480,7 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
             correct_last_predictions,
             last_accuracy_val,
             overall_correct_predictions,
-            overall_accuracy_val,
+            token_accuracy_val,
             rowwise_correct_predictions,
             rowwise_accuracy_val,
             edit_distance_val,
@@ -489,7 +507,7 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
                 tf.shape(targets)[1]
             )
         loss = self.loss
-        with tf.variable_scope('loss_{}'.format(self.name)):
+        with tf.compat.v1.variable_scope('loss_{}'.format(self.name)):
             if loss['type'] == 'softmax_cross_entropy':
                 train_loss = seq2seq_sequence_loss(
                     targets,
@@ -541,7 +559,7 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
             'value': 0,
             'type': MEASURE
         }),
-        (OVERALL_ACCURACY, {
+        (TOKEN_ACCURACY, {
             'output': CORRECT_OVERALL_PREDICTIONS,
             'aggregation': SEQ_SUM,
             'value': 0,
@@ -603,42 +621,95 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
             feature_metadata['max_sequence_length']
         )
         if isinstance(output_feature[LOSS]['class_weights'], (list, tuple)):
-            output_feature[LOSS]['class_weights'] = (
-                    [0, 0] + output_feature[LOSS]['class_weights']
-
-            )
-            # for UNK and PAD
             if (len(output_feature[LOSS]['class_weights']) !=
                     output_feature['num_classes']):
                 raise ValueError(
                     'The length of class_weights ({}) is not compatible with '
-                    'the number of classes ({})'.format(
+                    'the number of classes ({}) for feature {}. '
+                    'Check the metadata JSON file to see the classes '
+                    'and their order and consider there needs to be a weight '
+                    'for the <UNK> and <PAD> class too.'.format(
                         len(output_feature[LOSS]['class_weights']),
-                        output_feature['num_classes']
+                        output_feature['num_classes'],
+                        output_feature['name']
                     )
                 )
 
-        if output_feature[LOSS]['class_distance_temperature'] > 0:
-            if 'distances' in feature_metadata:
-                distances = feature_metadata['distances']
-                temperature = output_feature[LOSS]['class_distance_temperature']
-                for i in range(len(distances)):
-                    distances[i, :] = softmax(
-                        distances[i, :],
+        if output_feature[LOSS]['class_similarities_temperature'] > 0:
+            if 'class_similarities' in output_feature[LOSS]:
+                similarities = output_feature[LOSS]['class_similarities']
+                temperature = output_feature[LOSS][
+                    'class_similarities_temperature']
+
+                curr_row = 0
+                first_row_length = 0
+                is_first_row = True
+                for row in similarities:
+                    if is_first_row:
+                        first_row_length = len(row)
+                        is_first_row = False
+                        curr_row += 1
+                    else:
+                        curr_row_length = len(row)
+                        if curr_row_length != first_row_length:
+                            raise ValueError(
+                                'The length of row {} of the class_similarities '
+                                'of {} is {}, different from the length of '
+                                'the first row {}. All rows must have '
+                                'the same length.'.format(
+                                    curr_row,
+                                    output_feature['name'],
+                                    curr_row_length,
+                                    first_row_length
+                                )
+                            )
+                        else:
+                            curr_row += 1
+                all_rows_length = first_row_length
+
+                if all_rows_length != len(similarities):
+                    raise ValueError(
+                        'The class_similarities matrix of {} has '
+                        '{} rows and {} columns, '
+                        'their number must be identical.'.format(
+                            output_feature['name'],
+                            len(similarities),
+                            all_rows_length
+                        )
+                    )
+
+                if all_rows_length != output_feature['num_classes']:
+                    raise ValueError(
+                        'The size of the class_similarities matrix of {} is '
+                        '{}, different from the number of classe ({}). '
+                        'Check the metadata JSON file to see the classes '
+                        'and their order and '
+                        'consider <UNK> and <PAD> class too.'.format(
+                            output_feature['name'],
+                            all_rows_length,
+                            output_feature['num_classes']
+                        )
+                    )
+
+                similarities = np.array(similarities, dtype=np.float32)
+                for i in range(len(similarities)):
+                    similarities[i, :] = softmax(
+                        similarities[i, :],
                         temperature=temperature
                     )
-                output_feature[LOSS]['distances'] = distances
+                output_feature[LOSS]['class_similarities'] = similarities
             else:
                 raise ValueError(
-                    'No class distance metadata available '
+                    'class_similarities_temperature > 0, '
+                    'but no class_similarities are provided '
                     'for feature {}'.format(output_feature['name'])
                 )
 
         if output_feature[LOSS]['type'] == 'sampled_softmax_cross_entropy':
-            output_feature[LOSS]['class_counts'] = [(
+            output_feature[LOSS]['class_counts'] = [
                 feature_metadata['str2freq'][cls]
                 for cls in feature_metadata['idx2str']
-            )]
+            ]
 
     @staticmethod
     def calculate_overall_stats(
@@ -667,7 +738,7 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
             result,
             metadata,
             experiment_dir_name,
-            skip_save_unprocessed_output=False
+            skip_save_unprocessed_output=False,
     ):
         postprocessed = {}
         npy_filename = os.path.join(experiment_dir_name, '{}_{}.npy')
@@ -677,7 +748,9 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
             preds = result[PREDICTIONS]
             if 'idx2str' in metadata:
                 postprocessed[PREDICTIONS] = [
-                    [metadata['idx2str'][token] for token in pred]
+                    [metadata['idx2str'][token]
+                     if token < len(metadata['idx2str']) else UNKNOWN_SYMBOL
+                     for token in pred]
                     for pred in preds
                 ]
             else:
@@ -692,7 +765,9 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
             last_preds = result[LAST_PREDICTIONS]
             if 'idx2str' in metadata:
                 postprocessed[LAST_PREDICTIONS] = [
-                    metadata['idx2str'][last_pred] for last_pred in last_preds
+                    metadata['idx2str'][last_pred]
+                    if last_pred < len(metadata['idx2str']) else UNKNOWN_SYMBOL
+                    for last_pred in last_preds
                 ]
             else:
                 postprocessed[LAST_PREDICTIONS] = last_preds
@@ -709,19 +784,25 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
                 if len(probs) > 0 and isinstance(probs[0], list):
                     prob = []
                     for i in range(len(probs)):
+                        # todo: should adapt for the case of beam > 1
                         for j in range(len(probs[i])):
                             probs[i][j] = np.max(probs[i][j])
                         prob.append(np.prod(probs[i]))
-                else:
-                    probs = np.amax(probs, axis=-1)
+                elif isinstance(probs, np.ndarray):
+                    if (probs.shape) == 3:  # prob of each class of each token
+                        probs = np.amax(probs, axis=-1)
                     prob = np.prod(probs, axis=-1)
 
-                postprocessed[PROBABILITIES] = probs
-                postprocessed['probability'] = prob
+                # commenting probabilities out because usually it is huge:
+                # dataset x length x classes
+                # todo: add a mechanism for letting the user decide to save it
+                # postprocessed[PROBABILITIES] = probs
+                postprocessed[PROBABILITY] = prob
 
                 if not skip_save_unprocessed_output:
-                    np.save(npy_filename.format(name, PROBABILITIES), probs)
-                    np.save(npy_filename.format(name, 'probability'), prob)
+                    # commenting probabilities out, see comment above
+                    # np.save(npy_filename.format(name, PROBABILITIES), probs)
+                    np.save(npy_filename.format(name, PROBABILITY), prob)
 
             del result[PROBABILITIES]
 
@@ -744,7 +825,7 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
                 'class_weights': 1,
                 'robust_lambda': 0,
                 'confidence_penalty': 0,
-                'class_distance_temperature': 0,
+                'class_similarities_temperature': 0,
                 'weight': 1
             }
         )
@@ -753,9 +834,9 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
         set_default_value(output_feature[LOSS], 'class_weights', 1)
         set_default_value(output_feature[LOSS], 'robust_lambda', 0)
         set_default_value(output_feature[LOSS], 'confidence_penalty', 0)
-        set_default_value(output_feature[LOSS], 'class_distance_temperature', 0)
+        set_default_value(output_feature[LOSS],
+                          'class_similarities_temperature', 0)
         set_default_value(output_feature[LOSS], 'weight', 1)
-        set_default_value(output_feature[LOSS], 'type', 'softmax_cross_entropy')
 
         if output_feature[LOSS]['type'] == 'sampled_softmax_cross_entropy':
             set_default_value(output_feature[LOSS], 'sampler', 'log_uniform')
@@ -767,7 +848,6 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
             set_default_value(output_feature[LOSS], 'distortion', 1)
 
         set_default_value(output_feature[LOSS], 'unique', False)
-        set_default_value(output_feature[LOSS], 'weight', 1)
 
         set_default_value(output_feature, 'decoder', 'generator')
 
@@ -785,7 +865,13 @@ sequence_encoder_registry = {
     'stacked_parallel_cnn': StackedParallelCNN,
     'rnn': RNN,
     'cnnrnn': CNNRNN,
-    'embed': EmbedEncoder
+    'embed': EmbedEncoder,
+    'bert': BERT,
+    'passthrough': PassthroughEncoder,
+    'null': PassthroughEncoder,
+    'none': PassthroughEncoder,
+    'None': PassthroughEncoder,
+    None: PassthroughEncoder
 }
 
 sequence_decoder_registry = {

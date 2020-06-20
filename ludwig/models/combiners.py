@@ -20,7 +20,7 @@ import tensorflow as tf
 
 from ludwig.features.feature_utils import SEQUENCE_TYPES
 from ludwig.models.modules.fully_connected_modules import FCStack
-from ludwig.models.modules.recurrent_modules import reduce_sequence
+from ludwig.models.modules.reduction_modules import reduce_sequence
 from ludwig.models.modules.sequence_encoders import CNNRNN
 from ludwig.models.modules.sequence_encoders import ParallelCNN
 from ludwig.models.modules.sequence_encoders import RNN
@@ -28,6 +28,8 @@ from ludwig.models.modules.sequence_encoders import StackedCNN
 from ludwig.models.modules.sequence_encoders import StackedParallelCNN
 from ludwig.utils.misc import get_from_registry
 from ludwig.utils.tf_utils import sequence_length_3D
+
+logger = logging.getLogger(__name__)
 
 
 class ConcatCombiner:
@@ -78,12 +80,12 @@ class ConcatCombiner:
             representations_size += fe_properties['size']
 
         scope_name = 'concat_combiner'
-        with tf.variable_scope(scope_name):
+        with tf.compat.v1.variable_scope(scope_name):
             # ================ Concat ================
             hidden = tf.concat(representations, 1)
             hidden_size = representations_size
 
-            logging.debug('  concat_hidden: {0}'.format(hidden))
+            logger.debug('  concat_hidden: {0}'.format(hidden))
 
             # ================ Fully Connected ================
             if self.fc_stack is not None:
@@ -96,7 +98,7 @@ class ConcatCombiner:
                 )
 
                 hidden_size = self.fc_stack.layers[-1]['fc_size']
-                logging.debug('  final_hidden: {0}'.format(hidden))
+                logger.debug('  final_hidden: {0}'.format(hidden))
 
             hidden = tf.identity(hidden, name=scope_name)
 
@@ -142,10 +144,10 @@ class SequenceConcatCombiner:
         scope_name = 'sequence_concat_combiner'
         sequence_length = sequence_length_3D(representation)
 
-        with tf.variable_scope(scope_name):
+        with tf.compat.v1.variable_scope(scope_name):
             # ================ Concat ================
             for fe_name, fe_properties in feature_encodings.items():
-                if fe_name is not self.main_sequence_feature:
+                if fe_name != self.main_sequence_feature:
                     if fe_properties['type'] in SEQUENCE_TYPES and \
                             len(fe_properties['representation'].shape) == 3:
                         # The following check makes sense when
@@ -203,7 +205,7 @@ class SequenceConcatCombiner:
                             tf.expand_dims(fe_properties['representation'], 1),
                             multipliers
                         )
-                        logging.debug('  tiled_representation: {0}'.format(
+                        logger.debug('  tiled_representation: {0}'.format(
                             tiled_representation))
 
                         mask = tf.sequence_mask(
@@ -230,7 +232,7 @@ class SequenceConcatCombiner:
                     representations_size += fe_properties['size']
 
             hidden = tf.concat(representations, 2)
-            logging.debug('  concat_hidden: {0}'.format(hidden))
+            logger.debug('  concat_hidden: {0}'.format(hidden))
             hidden_size = representations_size
 
             # ================ Mask ================
@@ -247,7 +249,7 @@ class SequenceConcatCombiner:
                 hidden,
                 self.reduce_output
             )
-            logging.debug('  reduced_concat_hidden: {0}'.format(hidden))
+            logger.debug('  reduced_concat_hidden: {0}'.format(hidden))
 
             hidden = tf.identity(hidden, name=scope_name)
 
@@ -263,13 +265,14 @@ class SequenceCombiner:
             **kwargs
     ):
         self.combiner = SequenceConcatCombiner(
-            reduce_output=reduce_output,
+            reduce_output=None,
             main_sequence_feature=main_sequence_feature
         )
 
         self.encoder_obj = get_from_registry(
             encoder, sequence_encoder_registry)(
             should_embed=False,
+            reduce_output=reduce_output,
             **kwargs
         )
 
@@ -282,7 +285,7 @@ class SequenceCombiner:
             **kwargs
     ):
         scope_name = 'sequence_combiner'
-        with tf.variable_scope(scope_name):
+        with tf.compat.v1.variable_scope(scope_name):
             # ================ Concat ================
             hidden, hidden_size = self.combiner(
                 feature_encodings,
@@ -298,7 +301,7 @@ class SequenceCombiner:
                 dropout_rate=dropout_rate,
                 is_training=is_training
             )
-            logging.debug('  sequence_hidden: {0}'.format(hidden))
+            logger.debug('  sequence_hidden: {0}'.format(hidden))
 
             hidden = tf.identity(hidden, name=scope_name)
 

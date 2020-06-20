@@ -35,6 +35,9 @@ from ludwig.models.modules.measure_modules import r2 as get_r2
 from ludwig.models.modules.measure_modules import \
     squared_error as get_squared_error
 from ludwig.utils.misc import set_default_value
+from ludwig.utils.misc import set_default_values
+
+logger = logging.getLogger(__name__)
 
 
 class NumericalBaseFeature(BaseFeature):
@@ -44,12 +47,32 @@ class NumericalBaseFeature(BaseFeature):
 
     preprocessing_defaults = {
         'missing_value_strategy': FILL_WITH_CONST,
-        'fill_value': 0
+        'fill_value': 0,
+        'normalization': None
     }
 
     @staticmethod
     def get_feature_meta(column, preprocessing_parameters):
-        return {}
+        if preprocessing_parameters['normalization'] is not None:
+            if preprocessing_parameters['normalization'] == 'zscore':
+                return {
+                    'mean': column.astype(np.float32).mean(),
+                    'std': column.astype(np.float32).std()
+                }
+            elif preprocessing_parameters['normalization'] == 'minmax':
+                return {
+                    'min': column.astype(np.float32).min(),
+                    'max': column.astype(np.float32).max()
+                }
+            else:
+                logger.info(
+                    'Currently zscore and minmax are the only '
+                    'normalization strategies available. No {}'.format(
+                        preprocessing_parameters['normalization'])
+                )
+                return {}
+        else:
+            return {}
 
     @staticmethod
     def add_feature_data(
@@ -60,7 +83,17 @@ class NumericalBaseFeature(BaseFeature):
             preprocessing_parameters,
     ):
         data[feature['name']] = dataset_df[feature['name']].astype(
-            np.float32).as_matrix()
+            np.float32).values
+        if preprocessing_parameters['normalization'] is not None:
+            if preprocessing_parameters['normalization'] == 'zscore':
+                mean = metadata[feature['name']]['mean']
+                std = metadata[feature['name']]['std']
+                data[feature['name']] = (data[feature['name']]-mean)/std
+            elif preprocessing_parameters['normalization'] == 'minmax':
+                min_ = metadata[feature['name']]['min']
+                max_ = metadata[feature['name']]['max']
+                data[feature['name']] = (
+                    data[feature['name']]-min_)/(max_-min_)
 
 
 class NumericalInputFeature(NumericalBaseFeature, InputFeature):
@@ -73,7 +106,7 @@ class NumericalInputFeature(NumericalBaseFeature, InputFeature):
         _ = self.overwrite_defaults(feature)
 
     def _get_input_placeholder(self):
-        return tf.placeholder(
+        return tf.compat.v1.placeholder(
             tf.float32,
             shape=[None],  # None is for dealing with variable batch size
             name='{}_placeholder'.format(self.name)
@@ -96,10 +129,11 @@ class NumericalInputFeature(NumericalBaseFeature, InputFeature):
             norm=self.norm,
             dropout=self.dropout,
             dropout_rate=dropout_rate,
-            regularizer=regularizer
+            regularizer=regularizer,
+            initializer='ones'
         )
 
-        logging.debug('  feature_representation: {0}'.format(
+        logger.debug('  feature_representation: {0}'.format(
             feature_representation))
 
         feature_representation = {'type': self.name,
@@ -128,13 +162,14 @@ class NumericalOutputFeature(NumericalBaseFeature, OutputFeature):
         super().__init__(feature)
 
         self.loss = {'type': MEAN_SQUARED_ERROR}
+        self.clip = None
         self.initializer = None
         self.regularize = True
 
         _ = self.overwrite_defaults(feature)
 
     def _get_output_placeholder(self):
-        return tf.placeholder(
+        return tf.compat.v1.placeholder(
             tf.float32,
             [None],  # None is for dealing with variable batch size
             name='{}_placeholder'.format(self.name)
@@ -149,33 +184,53 @@ class NumericalOutputFeature(NumericalBaseFeature, OutputFeature):
         if not self.regularize:
             regularizer = None
 
-        with tf.variable_scope('predictions_{}'.format(self.name)):
+        with tf.compat.v1.variable_scope('predictions_{}'.format(self.name)):
             initializer_obj = get_initializer(self.initializer)
-            weights = tf.get_variable(
+            weights = tf.compat.v1.get_variable(
                 'weights',
                 initializer=initializer_obj([hidden_size, 1]),
                 regularizer=regularizer
             )
-            logging.debug('  regression_weights: {0}'.format(weights))
+            logger.debug('  regression_weights: {0}'.format(weights))
 
-            biases = tf.get_variable('biases', [1])
-            logging.debug('  regression_biases: {0}'.format(biases))
+            biases = tf.compat.v1.get_variable('biases', [1])
+            logger.debug('  regression_biases: {0}'.format(biases))
 
             predictions = tf.reshape(
                 tf.matmul(hidden, weights) + biases,
                 [-1]
             )
-            logging.debug('  predictions: {0}'.format(predictions))
+            logger.debug('  predictions: {0}'.format(predictions))
+
+            if self.clip is not None:
+                if isinstance(self.clip, (list, tuple)) and len(self.clip) == 2:
+                    predictions = tf.clip_by_value(
+                        predictions,
+                        self.clip[0],
+                        self.clip[1]
+                    )
+                    logger.debug(
+                        '  clipped_predictions: {0}'.format(predictions)
+                    )
+                else:
+                    raise ValueError(
+                        'The clip parameter of {} is {}. '
+                        'It must be a list or a tuple of length 2.'.format(
+                            self.name,
+                            self.clip
+                        )
+                    )
 
         return predictions
 
     def _get_loss(self, targets, predictions):
-        with tf.variable_scope('loss_{}'.format(self.name)):
+        with tf.compat.v1.variable_scope('loss_{}'.format(self.name)):
             if self.loss['type'] == 'mean_squared_error':
-                train_loss = tf.losses.mean_squared_error(
+                train_loss = tf.compat.v1.losses.mean_squared_error(
                     labels=targets,
                     predictions=predictions,
-                    reduction=Reduction.NONE)
+                    reduction=Reduction.NONE
+                )
             elif self.loss['type'] == 'mean_absolute_error':
                 train_loss = tf.losses.absolute_difference(
                     labels=targets,
@@ -198,7 +253,7 @@ class NumericalOutputFeature(NumericalBaseFeature, OutputFeature):
 
     def _get_measures(self, targets, predictions):
 
-        with tf.variable_scope('measures_{}'.format(self.name)):
+        with tf.compat.v1.variable_scope('measures_{}'.format(self.name)):
             error_val = get_error(
                 targets,
                 predictions,
@@ -226,6 +281,8 @@ class NumericalOutputFeature(NumericalBaseFeature, OutputFeature):
             hidden,
             hidden_size,
             regularizer=None,
+            dropout_rate=None,
+            is_training=None,
             **kwargs
     ):
         output_tensors = {}
@@ -233,7 +290,7 @@ class NumericalOutputFeature(NumericalBaseFeature, OutputFeature):
         # ================ Placeholder ================
         targets = self._get_output_placeholder()
         output_tensors[self.name] = targets
-        logging.debug('  targets_placeholder: {0}'.format(targets))
+        logger.debug('  targets_placeholder: {0}'.format(targets))
 
         # ================ Predictions ================
         predictions = self._get_predictions(
@@ -255,28 +312,28 @@ class NumericalOutputFeature(NumericalBaseFeature, OutputFeature):
         output_tensors[R2 + '_' + self.name] = r2
 
         if 'sampled' not in self.loss['type']:
-            tf.summary.scalar(
-                'train_batch_mean_squared_error_{}'.format(self.name),
+            tf.compat.v1.summary.scalar(
+                'batch_train_mean_squared_error_{}'.format(self.name),
                 tf.reduce_mean(squared_error)
             )
-            tf.summary.scalar(
-                'train_batch_mean_absolute_error_{}'.format(self.name),
+            tf.compat.v1.summary.scalar(
+                'batch_train_mean_absolute_error_{}'.format(self.name),
                 tf.reduce_mean(absolute_error)
             )
-            tf.summary.scalar(
-                'train_batch_mean_r2_{}'.format(self.name),
+            tf.compat.v1.summary.scalar(
+                'batch_train_mean_r2_{}'.format(self.name),
                 tf.reduce_mean(r2)
             )
 
-        # ================ Loss (Binary Cross Entropy) ================
+        # ================ Loss ================
         train_mean_loss, eval_loss = self._get_loss(targets, predictions)
 
         output_tensors[EVAL_LOSS + '_' + self.name] = eval_loss
         output_tensors[
             TRAIN_MEAN_LOSS + '_' + self.name] = train_mean_loss
 
-        tf.summary.scalar(
-            'train_mean_loss_{}'.format(self.name),
+        tf.compat.v1.summary.scalar(
+            'batch_train_mean_loss_{}'.format(self.name),
             train_mean_loss,
         )
 
@@ -347,7 +404,7 @@ class NumericalOutputFeature(NumericalBaseFeature, OutputFeature):
             result,
             metadata,
             experiment_dir_name,
-            skip_save_unprocessed_output=False
+            skip_save_unprocessed_output=False,
     ):
         postprocessed = {}
         npy_filename = os.path.join(experiment_dir_name, '{}_{}.npy')
@@ -381,7 +438,14 @@ class NumericalOutputFeature(NumericalBaseFeature, OutputFeature):
             {'type': 'mean_squared_error', 'weight': 1}
         )
         set_default_value(output_feature[LOSS], 'type', 'mean_squared_error')
-        set_default_value(output_feature, 'dependencies', [])
-        set_default_value(output_feature, 'weight', 1)
-        set_default_value(output_feature, 'reduce_input', SUM)
-        set_default_value(output_feature, 'reduce_dependencies', SUM)
+        set_default_value(output_feature[LOSS], 'weight', 1)
+
+        set_default_values(
+            output_feature,
+            {
+                'clip': None,
+                'dependencies': [],
+                'reduce_input': SUM,
+                'reduce_dependencies': SUM
+            }
+        )

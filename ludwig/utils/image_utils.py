@@ -14,13 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+import logging
+import sys
 from math import floor, ceil
 
 import numpy as np
-from skimage.transform import resize
-from skimage import img_as_ubyte
 
 from ludwig.constants import CROP_OR_PAD, INTERPOLATE
+
+logger = logging.getLogger(__name__)
 
 
 def pad(img, size, axis):
@@ -57,8 +59,47 @@ def crop_or_pad(img, new_size_tuple):
 
 
 def resize_image(img, new_size_typle, resize_method):
-    if resize_method == CROP_OR_PAD:
-        return crop_or_pad(img, new_size_typle)
-    elif resize_method == INTERPOLATE:
-        return img_as_ubyte(resize(img, new_size_typle))
-    raise ValueError('Invalid image resize method: {}'.format(resize_method))
+    try:
+        from skimage import img_as_ubyte
+        from skimage.transform import resize
+    except ImportError:
+        logger.error(
+            ' scikit-image is not installed. '
+            'In order to install all image feature dependencies run '
+            'pip install ludwig[image]'
+        )
+        sys.exit(-1)
+
+    if tuple(img.shape[:2]) != new_size_typle:
+        if resize_method == CROP_OR_PAD:
+            return crop_or_pad(img, new_size_typle)
+        elif resize_method == INTERPOLATE:
+            return img_as_ubyte(resize(img, new_size_typle))
+        raise ValueError(
+            'Invalid image resize method: {}'.format(resize_method))
+    return img
+
+
+def greyscale(img):
+    try:
+        from skimage import img_as_ubyte
+        from skimage.color import rgb2gray
+    except ImportError:
+        logger.error(
+            ' scikit-image is not installed. '
+            'In order to install all image feature dependencies run '
+            'pip install ludwig[image]'
+        )
+        sys.exit(-1)
+
+    return np.expand_dims(img_as_ubyte(rgb2gray(img)), axis=2)
+
+
+def num_channels_in_image(img):
+    if img is None or img.ndim < 2:
+        raise ValueError('Invalid image data')
+
+    if img.ndim == 2:
+        return 1
+    else:
+        return img.shape[2]

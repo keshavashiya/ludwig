@@ -19,6 +19,8 @@ import tensorflow as tf
 
 from ludwig.models.modules.initializer_modules import get_initializer
 
+logger = logging.getLogger(__name__)
+
 
 def conv_1d(inputs, weights, biases,
             stride=1, padding='SAME',
@@ -30,8 +32,10 @@ def conv_1d(inputs, weights, biases,
 
     if norm is not None:
         if norm == 'batch':
-            hidden = tf.contrib.layers.batch_norm(hidden,
-                                                  is_training=is_training)
+            hidden = tf.layers.batch_normalization(
+                hidden,
+                training=is_training
+            )
         elif norm == 'layer':
             hidden = tf.contrib.layers.layer_norm(hidden)
 
@@ -55,8 +59,10 @@ def conv_2d(inputs, weights, biases,
 
     if norm is not None:
         if norm == 'batch':
-            hidden = tf.contrib.layers.batch_norm(hidden,
-                                                  is_training=is_training)
+            hidden = tf.layers.batch_normalization(
+                hidden,
+                training=is_training
+            )
         elif norm == 'layer':
             hidden = tf.contrib.layers.layer_norm(hidden)
 
@@ -77,7 +83,7 @@ def conv_layer(inputs, kernel_shape, biases_shape,
                dimensions=2, is_training=True):
     if initializer is not None:
         initializer_obj = get_initializer(initializer)
-        weights = tf.get_variable(
+        weights = tf.compat.v1.get_variable(
             'weights',
             initializer=initializer_obj(kernel_shape),
             regularizer=regularizer
@@ -89,17 +95,17 @@ def conv_layer(inputs, kernel_shape, biases_shape,
             initializer = get_initializer('glorot_uniform')
         # if initializer is None, tensorFlow seems to be using
         # a glorot uniform initializer
-        weights = tf.get_variable(
+        weights = tf.compat.v1.get_variable(
             'weights',
             kernel_shape,
             regularizer=regularizer,
             initializer=initializer
         )
-    logging.debug('  conv_weights: {0}'.format(weights))
+    logger.debug('  conv_weights: {0}'.format(weights))
 
-    biases = tf.get_variable('biases', biases_shape,
+    biases = tf.compat.v1.get_variable('biases', biases_shape,
                              initializer=tf.constant_initializer(0.01))
-    logging.debug('  conv_biases: {0}'.format(biases))
+    logger.debug('  conv_biases: {0}'.format(biases))
 
     if dimensions == 1:
         return conv_1d(inputs, weights, biases,
@@ -147,13 +153,15 @@ def conv_2d_layer(inputs, kernel_shape, biases_shape, stride=1, padding='SAME',
                       dimensions=2, is_training=is_training)
 
 
-def flatten(hidden):
+def flatten(hidden, skip_first=True):
     hidden_size = 1
-    for x in hidden.shape:
+    # if hidden is activation, the first dimension is the batch_size
+    start = 1 if skip_first else 0
+    for x in hidden.shape[start:]:
         if x.value is not None:
             hidden_size *= x.value
     hidden = tf.reshape(hidden, [-1, hidden_size], name='flatten')
-    logging.debug('  flatten hidden: {0}'.format(hidden))
+    logger.debug('  flatten hidden: {0}'.format(hidden))
     return hidden, hidden_size
 
 
@@ -230,7 +238,7 @@ class ConvStack1D:
 
         for i in range(num_conv_layers):
             layer = self.layers[i]
-            with tf.variable_scope('conv_{}'.format(i)):
+            with tf.compat.v1.variable_scope('conv_{}'.format(i)):
                 # Convolution Layer
                 filter_shape = [
                     layer['filter_size'],
@@ -249,7 +257,7 @@ class ConvStack1D:
                                                  'regularize'] else None,
                                              is_training=is_training)
                 prev_num_filters = layer['num_filters']
-                logging.debug('  conv_{}: {}'.format(i, layer_output))
+                logger.debug('  conv_{}: {}'.format(i, layer_output))
 
                 # Pooling
                 if layer['pool_size'] is not None:
@@ -260,11 +268,11 @@ class ConvStack1D:
                         padding='VALID',
                         name='pool_{}'.format(layer['filter_size'])
                     )
-                    logging.debug('  pool_{}: {}'.format(
+                    logger.debug('  pool_{}: {}'.format(
                         i, layer_output))
 
             hidden = layer_output
-            logging.debug('  hidden: {0}'.format(hidden))
+            logger.debug('  hidden: {0}'.format(hidden))
 
         return hidden
 
@@ -329,7 +337,7 @@ class ParallelConv1D:
         parallel_conv_layers = []
 
         for i, layer in enumerate(self.layers):
-            with tf.variable_scope(
+            with tf.compat.v1.variable_scope(
                     'conv_{}_fs{}'.format(i, layer['filter_size'])):
                 # Convolution Layer
                 filter_shape = [
@@ -349,7 +357,7 @@ class ParallelConv1D:
                                                  'regularize'] else None,
                                              is_training=is_training)
 
-                logging.debug('  conv_{}_fs{}: {}'.format(
+                logger.debug('  conv_{}_fs{}: {}'.format(
                     i,
                     layer['filter_size'],
                     layer_output)
@@ -364,7 +372,7 @@ class ParallelConv1D:
                         padding='VALID',
                         name='pool_{}'.format(layer['filter_size'])
                     )
-                    logging.debug('  pool_{}_fs{}: {}'.format(
+                    logger.debug('  pool_{}_fs{}: {}'.format(
                         i,
                         layer['filter_size'],
                         layer_output
@@ -456,7 +464,7 @@ class StackParallelConv1D:
 
         for i in range(len(self.stacked_parallel_layers)):
             parallel_conv_layers = self.stacked_parallel_layers[i]
-            with tf.variable_scope('parallel_conv_{}'.format(i)):
+            with tf.compat.v1.variable_scope('parallel_conv_{}'.format(i)):
                 parallel_conv_1d = ParallelConv1D(parallel_conv_layers)
                 hidden = parallel_conv_1d(
                     hidden,
@@ -465,7 +473,7 @@ class StackParallelConv1D:
                     dropout_rate=dropout_rate,
                     is_training=is_training
                 )
-                logging.debug('  hidden: {}'.format(hidden))
+                logger.debug('  hidden: {}'.format(hidden))
 
             prev_num_filters = 0
             for layer in parallel_conv_layers:
@@ -484,7 +492,7 @@ class ConvStack2D:
             default_num_filters=256,
             default_pool_size=2,
             default_activation='relu',
-            default_stride=1,
+            default_stride=2,
             default_pool_stride=None,
             default_norm=None,
             default_dropout=False,
@@ -494,9 +502,8 @@ class ConvStack2D:
         if layers is None:
             if num_layers is None:
                 self.layers = [
-                    {'filter_size': 3, 'num_filters': 256, 'pool_size': 2},
-                    {'filter_size': 7, 'num_filters': 256, 'pool_size': 2},
-                    {'filter_size': 7, 'num_filters': 256, 'pool_size': 2}
+                    {'num_filters': 32},
+                    {'num_filters': 64, 'dropout': True},
                 ]
             else:
                 self.layers = []
@@ -543,7 +550,7 @@ class ConvStack2D:
         prev_num_filters = int(input_image.shape[-1])
         for i in range(num_layers):
             layer = self.layers[i]
-            with tf.variable_scope('conv_{}'.format(i)):
+            with tf.compat.v1.variable_scope('conv_{}'.format(i)):
                 # Convolution Layer
                 filter_shape = [
                     layer['filter_size'],
@@ -564,7 +571,7 @@ class ConvStack2D:
                                              initializer=layer['initializer'],
                                              is_training=is_training)
                 prev_num_filters = layer['num_filters']
-                logging.debug('  conv_{}: {}'.format(i, layer_output))
+                logger.debug('  conv_{}: {}'.format(i, layer_output))
 
                 # Pooling
                 if layer['pool_size'] is not None:
@@ -583,11 +590,11 @@ class ConvStack2D:
                         name='pool_{}'.format(i)
                     )
 
-                    logging.debug('  pool_{}: {}'.format(
+                    logger.debug('  pool_{}: {}'.format(
                         i, layer_output))
 
             hidden = layer_output
-            logging.debug('  hidden: {0}'.format(hidden))
+            logger.debug('  hidden: {0}'.format(hidden))
 
         return hidden
 
@@ -600,15 +607,19 @@ class ConvStack2D:
 ################################################################################
 # Convenience functions for building the ResNet model.
 ################################################################################
-def resnet_batch_norm(inputs, is_training):
+def resnet_batch_norm(inputs, is_training,
+                      batch_norm_momentum=0.9, batch_norm_epsilon=0.001):
     """Performs a batch normalization using a standard set of parameters."""
     # We set fused=True for a significant performance boost. See
     # https://www.tensorflow.org/performance/performance_guide#common_fused_ops
-    _BATCH_NORM_DECAY = 0.997
-    _BATCH_NORM_EPSILON = 1e-5
+    # Original implementation default values:
+    # _BATCH_NORM_DECAY = 0.997
+    # _BATCH_NORM_EPSILON = 1e-5
+    # they lead to a big difference between the loss
+    # at train and prediction time
     return tf.layers.batch_normalization(
         inputs=inputs, axis=3,
-        momentum=_BATCH_NORM_DECAY, epsilon=_BATCH_NORM_EPSILON, center=True,
+        momentum=batch_norm_momentum, epsilon=batch_norm_epsilon, center=True,
         scale=True, training=is_training, fused=True)
 
 
@@ -647,6 +658,18 @@ def conv2d_fixed_padding(inputs, filters, kernel_size, strides,
         kernel_regularizer=regularizer)
 
 
+resnet_choices = {
+    8: [1, 2, 2],
+    14: [1, 2, 2],
+    18: [2, 2, 2, 2],
+    34: [3, 4, 6, 3],
+    50: [3, 4, 6, 3],
+    101: [3, 4, 23, 3],
+    152: [3, 8, 36, 3],
+    200: [3, 24, 36, 3]
+}
+
+
 def get_resnet_block_sizes(resnet_size):
     """Retrieve the size of each block_layer in the ResNet model.
     The number of block layers used for the Resnet model varies according
@@ -659,23 +682,15 @@ def get_resnet_block_sizes(resnet_size):
     Raises:
       KeyError: if invalid resnet_size is received.
     """
-    choices = {
-        8: [1, 2, 2],
-        14: [1, 2, 2],
-        18: [2, 2, 2, 2],
-        34: [3, 4, 6, 3],
-        50: [3, 4, 6, 3],
-        101: [3, 4, 23, 3],
-        152: [3, 8, 36, 3],
-        200: [3, 24, 36, 3]
-    }
-
     try:
-        return choices[resnet_size]
+        return resnet_choices[resnet_size]
     except KeyError:
-        err = ('Could not find layers for selected Resnet size.\n'
-               'Size received: {}; sizes allowed: {}.'.format(
-            resnet_size, choices.keys()))
+        err = (
+            'Could not find layers for selected Resnet size.\n'
+            'Size received: {}; sizes allowed: {}.'.format(
+                resnet_size, resnet_choices.keys()
+            )
+        )
         raise ValueError(err)
 
 
@@ -683,7 +698,8 @@ def get_resnet_block_sizes(resnet_size):
 # ResNet block definitions.
 ################################################################################
 def resnet_block(inputs, filters, is_training, projection_shortcut, strides,
-                 regularizer=None):
+                 regularizer=None, batch_norm_momentum=0.9,
+                 batch_norm_epsilon=0.001):
     """A single block for ResNet v2, without a bottleneck.
     Batch normalization then ReLu then convolution as described by:
       Identity Mappings in Deep Residual Networks
@@ -703,7 +719,9 @@ def resnet_block(inputs, filters, is_training, projection_shortcut, strides,
       The output tensor of the block; shape should match inputs.
     """
     shortcut = inputs
-    inputs = resnet_batch_norm(inputs, is_training)
+    inputs = resnet_batch_norm(inputs, is_training,
+                               batch_norm_momentum=batch_norm_momentum,
+                               batch_norm_epsilon=batch_norm_epsilon)
     inputs = tf.nn.relu(inputs)
 
     # The projection shortcut should come after the first batch norm and ReLU
@@ -715,7 +733,9 @@ def resnet_block(inputs, filters, is_training, projection_shortcut, strides,
         inputs=inputs, filters=filters, kernel_size=3, strides=strides,
         regularizer=regularizer)
 
-    inputs = resnet_batch_norm(inputs, is_training)
+    inputs = resnet_batch_norm(inputs, is_training,
+                               batch_norm_momentum=batch_norm_momentum,
+                               batch_norm_epsilon=batch_norm_epsilon)
     inputs = tf.nn.relu(inputs)
     inputs = conv2d_fixed_padding(
         inputs=inputs, filters=filters, kernel_size=3, strides=1,
@@ -725,7 +745,8 @@ def resnet_block(inputs, filters, is_training, projection_shortcut, strides,
 
 
 def resnet_bottleneck_block(inputs, filters, is_training, projection_shortcut,
-                            strides, regularizer=None):
+                            strides, regularizer=None, batch_norm_momentum=0.9,
+                            batch_norm_epsilon=0.001):
     """A single block for ResNet v2, with a bottleneck.
     Similar to _building_block_v2(), except using the "bottleneck" blocks
     described in:
@@ -752,7 +773,9 @@ def resnet_bottleneck_block(inputs, filters, is_training, projection_shortcut,
       The output tensor of the block; shape should match inputs.
     """
     shortcut = inputs
-    inputs = resnet_batch_norm(inputs, is_training)
+    inputs = resnet_batch_norm(inputs, is_training,
+                               batch_norm_momentum=batch_norm_momentum,
+                               batch_norm_epsilon=batch_norm_epsilon)
     inputs = tf.nn.relu(inputs)
 
     # The projection shortcut should come after the first batch norm and ReLU
@@ -764,13 +787,17 @@ def resnet_bottleneck_block(inputs, filters, is_training, projection_shortcut,
         inputs=inputs, filters=filters, kernel_size=1, strides=1,
         regularizer=regularizer)
 
-    inputs = resnet_batch_norm(inputs, is_training)
+    inputs = resnet_batch_norm(inputs, is_training,
+                               batch_norm_momentum=batch_norm_momentum,
+                               batch_norm_epsilon=batch_norm_epsilon)
     inputs = tf.nn.relu(inputs)
     inputs = conv2d_fixed_padding(
         inputs=inputs, filters=filters, kernel_size=3, strides=strides,
         regularizer=regularizer)
 
-    inputs = resnet_batch_norm(inputs, is_training)
+    inputs = resnet_batch_norm(inputs, is_training,
+                               batch_norm_momentum=batch_norm_momentum,
+                               batch_norm_epsilon=batch_norm_epsilon)
     inputs = tf.nn.relu(inputs)
     inputs = conv2d_fixed_padding(
         inputs=inputs, filters=4 * filters, kernel_size=1, strides=1,
@@ -780,7 +807,8 @@ def resnet_bottleneck_block(inputs, filters, is_training, projection_shortcut,
 
 
 def resnet_block_layer(inputs, filters, bottleneck, block_fn, blocks, strides,
-                       is_training, name, regularizer=None):
+                       is_training, name, regularizer=None,
+                       batch_norm_momentum=0.9, batch_norm_epsilon=0.001):
     """Creates one layer of blocks for the ResNet model.
     Args:
       inputs: A tensor of size [batch, channels, height_in, width_in] or
@@ -809,11 +837,15 @@ def resnet_block_layer(inputs, filters, bottleneck, block_fn, blocks, strides,
 
     # Only the first block per block_layer uses projection_shortcut and strides
     inputs = block_fn(inputs, filters, is_training, projection_shortcut,
-                      strides, regularizer=regularizer)
+                      strides, regularizer=regularizer,
+                      batch_norm_momentum=batch_norm_momentum,
+                      batch_norm_epsilon=batch_norm_epsilon)
 
     for _ in range(1, blocks):
         inputs = block_fn(inputs, filters, is_training, None, 1,
-                          regularizer=regularizer)
+                          regularizer=regularizer,
+                          batch_norm_momentum=batch_norm_momentum,
+                          batch_norm_epsilon=batch_norm_epsilon)
 
     return tf.identity(inputs, name)
 
@@ -823,7 +855,8 @@ class ResNet(object):
 
     def __init__(self, resnet_size, bottleneck, num_filters,
                  kernel_size, conv_stride, first_pool_size, first_pool_stride,
-                 block_sizes, block_strides):
+                 block_sizes, block_strides, batch_norm_momentum=0.9,
+                 batch_norm_epsilon=0.001):
         """Creates a model obtaining an image representation.
 
         Implements ResNet v2:
@@ -867,6 +900,8 @@ class ResNet(object):
         self.block_sizes = block_sizes
         self.block_strides = block_strides
         self.pre_activation = True
+        self.batch_norm_momentum = batch_norm_momentum
+        self.batch_norm_epsilon = batch_norm_epsilon
 
     def __call__(
             self,
@@ -885,7 +920,7 @@ class ResNet(object):
         """
         inputs = input_image
 
-        with tf.variable_scope('resnet'):
+        with tf.compat.v1.variable_scope('resnet'):
             inputs = conv2d_fixed_padding(
                 inputs=inputs, filters=self.num_filters,
                 kernel_size=self.kernel_size,
@@ -906,12 +941,18 @@ class ResNet(object):
                     block_fn=self.block_fn, blocks=num_blocks,
                     strides=self.block_strides[i], is_training=is_training,
                     name='block_layer{}'.format(i + 1),
-                    regularizer=regularizer)
+                    regularizer=regularizer,
+                    batch_norm_momentum=self.batch_norm_momentum,
+                    batch_norm_epsilon=self.batch_norm_epsilon
+                )
 
             # Only apply the BN and ReLU for model that does pre_activation in each
             # building/bottleneck block, eg resnet V2.
             if self.pre_activation:
-                inputs = resnet_batch_norm(inputs, is_training)
+                inputs = resnet_batch_norm(
+                    inputs, is_training,
+                    batch_norm_momentum=self.batch_norm_momentum,
+                    batch_norm_epsilon=self.batch_norm_epsilon)
                 inputs = tf.nn.relu(inputs)
 
             # The current top layer has shape

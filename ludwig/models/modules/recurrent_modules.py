@@ -28,6 +28,9 @@ from ludwig.models.modules.reduction_modules import reduce_sequence
 from ludwig.utils.tf_utils import sequence_length_3D, sequence_length_2D
 
 
+logger = logging.getLogger(__name__)
+
+
 def get_cell_fun(cell_type):
     if cell_type == 'rnn':
         cell_fn = tf.nn.rnn_cell.BasicRNNCell
@@ -54,7 +57,7 @@ def get_cell_fun(cell_type):
     return cell_fn
 
 
-class Projection(tf.layers.Layer):
+class Projection(tf.compat.v1.layers.Layer):
     def __init__(self, projection_weights, projection_biases, name=None,
                  **kwargs):
         super(Projection, self).__init__(name=name, **kwargs)
@@ -171,7 +174,7 @@ class RecurrentStack:
         cell_fn = get_cell_fun(self.cell_type)
 
         # initial state
-        # init_state = tf.get_variable(
+        # init_state = tf.compat.v1.get_variable(
         #   'init_state',
         #   [1, state_size],
         #   initializer=tf.constant_initializer(0.0),
@@ -179,7 +182,7 @@ class RecurrentStack:
         # init_state = tf.tile(init_state, [batch_size, 1])
 
         # main RNN operation
-        with tf.variable_scope('rnn_stack', reuse=tf.AUTO_REUSE,
+        with tf.compat.v1.variable_scope('rnn_stack', reuse=tf.compat.v1.AUTO_REUSE,
                                regularizer=regularizer) as vs:
             if self.bidirectional:
                 # forward direction cell
@@ -211,11 +214,11 @@ class RecurrentStack:
 
             for v in tf.global_variables():
                 if v.name.startswith(vs.name):
-                    logging.debug('  {}: {}'.format(v.name, v))
-            logging.debug('  rnn_outputs: {0}'.format(rnn_outputs))
+                    logger.debug('  {}: {}'.format(v.name, v))
+            logger.debug('  rnn_outputs: {0}'.format(rnn_outputs))
 
             rnn_output = reduce_sequence(rnn_outputs, self.reduce_output)
-            logging.debug('  reduced_rnn_output: {0}'.format(rnn_output))
+            logger.debug('  reduced_rnn_output: {0}'.format(rnn_output))
 
         # dropout
         if self.dropout and dropout_rate is not None:
@@ -224,7 +227,7 @@ class RecurrentStack:
                 rate=dropout_rate,
                 training=is_training
             )
-            logging.debug('  dropout_rnn: {0}'.format(rnn_output))
+            logger.debug('  dropout_rnn: {0}'.format(rnn_output))
 
         return rnn_output, rnn_output.shape.as_list()[-1]
 
@@ -236,7 +239,7 @@ def recurrent_decoder(encoder_outputs, targets, max_sequence_length, vocab_size,
                       tied_target_embeddings=True, embeddings=None,
                       initializer=None, regularizer=None,
                       is_timeseries=False):
-    with tf.variable_scope('rnn_decoder', reuse=tf.AUTO_REUSE,
+    with tf.compat.v1.variable_scope('rnn_decoder', reuse=tf.compat.v1.AUTO_REUSE,
                            regularizer=regularizer):
 
         # ================ Setup ================
@@ -251,7 +254,7 @@ def recurrent_decoder(encoder_outputs, targets, max_sequence_length, vocab_size,
         # Project the encoder outputs to the size of the decoder state
         encoder_outputs_size = encoder_outputs.shape[-1]
         if projection and encoder_outputs_size != state_size:
-            with tf.variable_scope('projection'):
+            with tf.compat.v1.variable_scope('projection'):
                 encoder_output_rank = len(encoder_outputs.shape)
                 if encoder_output_rank > 2:
                     sequence_length = tf.shape(encoder_outputs)[1]
@@ -274,26 +277,26 @@ def recurrent_decoder(encoder_outputs, targets, max_sequence_length, vocab_size,
 
         # ================ Targets sequence ================
         # Calculate the length of inputs and the batch size
-        with tf.variable_scope('sequence'):
+        with tf.compat.v1.variable_scope('sequence'):
             targets_sequence_length = sequence_length_2D(targets)
             start_tokens = tf.tile([GO_SYMBOL], [batch_size])
             end_tokens = tf.tile([END_SYMBOL], [batch_size])
             if is_timeseries:
                 start_tokens = tf.cast(start_tokens, tf.float32)
                 end_tokens = tf.cast(end_tokens, tf.float32)
-            targets_with_go = tf.concat([
+            targets_with_go_and_eos = tf.concat([
                 tf.expand_dims(start_tokens, 1),
                 targets,
                 tf.expand_dims(end_tokens, 1)], 1)
-            logging.debug('  targets_with_go: {0}'.format(targets_with_go))
+            logger.debug('  targets_with_go: {0}'.format(targets_with_go_and_eos))
             targets_sequence_length_with_eos = targets_sequence_length + 1  # the EOS symbol is 0 so it's not increasing the real length of the sequence
 
         # ================ Embeddings ================
         if is_timeseries:
-            targets_embedded = tf.expand_dims(targets_with_go, -1)
+            targets_embedded = tf.expand_dims(targets_with_go_and_eos, -1)
             targets_embeddings = None
         else:
-            with tf.variable_scope('embedding'):
+            with tf.compat.v1.variable_scope('embedding'):
                 if embeddings is not None:
                     embedding_size = embeddings.shape.as_list()[-1]
                     if tied_target_embeddings:
@@ -302,7 +305,7 @@ def recurrent_decoder(encoder_outputs, targets, max_sequence_length, vocab_size,
                     embedding_size = state_size
 
                 if embeddings is not None:
-                    embedding_go = tf.get_variable('embedding_GO',
+                    embedding_go = tf.compat.v1.get_variable('embedding_GO',
                                                    initializer=tf.random_uniform(
                                                        [1, embedding_size],
                                                        -1.0, 1.0))
@@ -310,38 +313,38 @@ def recurrent_decoder(encoder_outputs, targets, max_sequence_length, vocab_size,
                                                    axis=0)
                 else:
                     initializer_obj = get_initializer(initializer)
-                    targets_embeddings = tf.get_variable(
+                    targets_embeddings = tf.compat.v1.get_variable(
                         'embeddings',
                         initializer=initializer_obj(
                             [vocab_size + 1, embedding_size]),
                         regularizer=regularizer
                     )
-                logging.debug(
+                logger.debug(
                     '  targets_embeddings: {0}'.format(targets_embeddings))
 
                 targets_embedded = tf.nn.embedding_lookup(targets_embeddings,
-                                                          targets_with_go,
+                                                          targets_with_go_and_eos,
                                                           name='decoder_input_embeddings')
-        logging.debug('  targets_embedded: {0}'.format(targets_embedded))
+        logger.debug('  targets_embedded: {0}'.format(targets_embedded))
 
         # ================ Class prediction ================
         if tied_target_embeddings:
             class_weights = tf.transpose(targets_embeddings)
         else:
             initializer_obj = get_initializer(initializer)
-            class_weights = tf.get_variable(
+            class_weights = tf.compat.v1.get_variable(
                 'class_weights',
                 initializer=initializer_obj([state_size, vocab_size + 1]),
                 regularizer=regularizer
             )
-        logging.debug('  class_weights: {0}'.format(class_weights))
-        class_biases = tf.get_variable('class_biases', [vocab_size + 1])
-        logging.debug('  class_biases: {0}'.format(class_biases))
+        logger.debug('  class_weights: {0}'.format(class_weights))
+        class_biases = tf.compat.v1.get_variable('class_biases', [vocab_size + 1])
+        logger.debug('  class_biases: {0}'.format(class_biases))
         projection_layer = Projection(class_weights, class_biases)
 
         # ================ RNN ================
         initial_state = encoder_outputs
-        with tf.variable_scope('rnn_cells') as vs:
+        with tf.compat.v1.variable_scope('rnn_cells') as vs:
             # Cell
             cell_fun = get_cell_fun(cell_type)
 
@@ -381,12 +384,15 @@ def recurrent_decoder(encoder_outputs, targets, max_sequence_length, vocab_size,
                             attention_mechanism))
                 cell = tf.contrib.seq2seq.AttentionWrapper(
                     cell, attention_mechanism, attention_layer_size=state_size)
-                initial_state = cell.zero_state(dtype=tf.float32,
-                                                batch_size=batch_size)
+                initial_state = cell.zero_state(
+                    dtype=tf.float32,
+                    batch_size=batch_size)
+                initial_state = initial_state.clone(
+                    cell_state=reduce_sequence(encoder_outputs, 'last'))
 
             for v in tf.global_variables():
                 if v.name.startswith(vs.name):
-                    logging.debug('  {}: {}'.format(v.name, v))
+                    logger.debug('  {}: {}'.format(v.name, v))
 
         # ================ Decoding ================
         def decode(initial_state, cell, helper, beam_width=1,
@@ -439,7 +445,7 @@ def recurrent_decoder(encoder_outputs, targets, max_sequence_length, vocab_size,
             train_helper = tf.contrib.seq2seq.TrainingHelper(
                 inputs=targets_embedded,
                 sequence_length=targets_sequence_length_with_eos)
-            final_outputs_train, final_state_train, final_sequence_lengths_train, = decode(
+            final_outputs_train, final_state_train, final_sequence_lengths_train = decode(
                 initial_state,
                 cell,
                 train_helper,
@@ -472,11 +478,19 @@ def recurrent_decoder(encoder_outputs, targets, max_sequence_length, vocab_size,
                 predictions_sequence_scores = final_outputs_pred.rnn_output
                 predictions_sequence_length_with_eos = final_sequence_lengths_pred
 
-    logging.debug('  train_logits: {0}'.format(train_logits))
-    logging.debug('  eval_logits: {0}'.format(eval_logits))
-    logging.debug('  predictions_sequence: {0}'.format(predictions_sequence))
-    logging.debug('  predictions_sequence_scores: {0}'.format(
+    logger.debug('  train_logits: {0}'.format(train_logits))
+    logger.debug('  eval_logits: {0}'.format(eval_logits))
+    logger.debug('  predictions_sequence: {0}'.format(predictions_sequence))
+    logger.debug('  predictions_sequence_scores: {0}'.format(
         predictions_sequence_scores))
 
-    return predictions_sequence, predictions_sequence_scores, predictions_sequence_length_with_eos, \
-           targets_sequence_length_with_eos, eval_logits, train_logits, class_weights, class_biases
+    return (
+        predictions_sequence,
+        predictions_sequence_scores,
+        predictions_sequence_length_with_eos,
+        targets_sequence_length_with_eos,
+        eval_logits,
+        train_logits,
+        class_weights,
+        class_biases
+    )

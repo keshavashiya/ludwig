@@ -25,6 +25,8 @@ import numpy as np
 from sklearn import metrics
 from sklearn.metrics import confusion_matrix
 
+logger = logging.getLogger(__name__)
+
 
 class ConfusionMatrix:
     def __init__(self, conditions, predictions, labels=None,
@@ -45,8 +47,8 @@ class ConfusionMatrix:
             self.idx2label = {idx: str(label) for idx, label in
                               enumerate(np.unique(
                                   [self.predictions, self.conditions]))}
-        self.cm = confusion_matrix(self.predictions,
-                                   self.conditions,
+        self.cm = confusion_matrix(self.conditions,
+                                   self.predictions,
                                    labels=labels,
                                    sample_weight=sample_weight)
 
@@ -188,7 +190,7 @@ class ConfusionMatrix:
         return self.positive_predictive_value(
             idx) + self.negative_predictive_value(idx) - 1
 
-    def overall_accuracy(self):
+    def token_accuracy(self):
         return metrics.accuracy_score(self.conditions, self.predictions)
 
     def avg_precision(self, average='macro'):
@@ -247,7 +249,7 @@ class ConfusionMatrix:
 
     def stats(self):
         return {
-            'overall_accuracy': self.overall_accuracy(),
+            'token_accuracy': self.token_accuracy(),
             'avg_precision_macro': self.avg_precision(average='macro'),
             'avg_recall_macro': self.avg_recall(average='macro'),
             'avg_f1_score_macro': self.avg_f1_score(average='macro'),
@@ -273,7 +275,7 @@ def roc_auc_score(conditions, prediction_scores, average='micro',
         return metrics.roc_auc_score(conditions, prediction_scores, average,
                                      sample_weight)
     except ValueError as ve:
-        logging.info(ve)
+        logger.info(ve)
 
 
 def precision_recall_curve(conditions, prediction_scores, pos_label=None,
@@ -298,7 +300,7 @@ def average_precision_score(conditions, prediction_scores, average='micro',
 #     args = parser.parse_args()
 #
 #     hdf5_data = h5py.File(args.gold_standard, 'r')
-#     split = hdf5_data['split'].value
+#     split = hdf5_data[SPLIT].value
 #     column = hdf5_data['macros'].value
 #     hdf5_data.close()
 #     conditions = column[split == 2]  # ground truth

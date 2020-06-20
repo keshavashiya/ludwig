@@ -18,9 +18,12 @@ from collections import OrderedDict
 
 import tensorflow as tf
 
+from ludwig.constants import LOSS, ACCURACY, MEASURE
 from ludwig.features.feature_registries import output_type_registry
 from ludwig.utils.algorithms_utils import topological_sort_feature_dependencies
 from ludwig.utils.misc import get_from_registry
+
+logger = logging.getLogger(__name__)
 
 
 def build_outputs(output_features, hidden, hidden_size, regularizer,
@@ -49,11 +52,11 @@ def build_outputs(output_features, hidden, hidden_size, regularizer,
     train_combined_mean_loss = tf.reduce_sum(tf.stack(output_train_losses),
                                              name='train_combined_mean_loss')
     if regularizer is not None:
-        regularization_losses = tf.get_collection(
-            tf.GraphKeys.REGULARIZATION_LOSSES)
+        regularization_losses = tf.compat.v1.get_collection(
+            tf.compat.v1.GraphKeys.REGULARIZATION_LOSSES)
         if regularization_losses:
             regularization_loss = tf.add_n(regularization_losses)
-            logging.debug('- Regularization losses: {0}'.format(
+            logger.debug('- Regularization losses: {0}'.format(
                 regularization_losses))
 
         else:
@@ -73,11 +76,11 @@ def build_outputs(output_features, hidden, hidden_size, regularizer,
 def build_single_output(output_feature, feature_hidden, feature_hidden_size,
                         final_hidden,
                         dropout_rate, regularizer, is_training=True, **kwargs):
-    logging.debug('- Output {} feature {}'.format(
+    logger.debug('- Output {} feature {}'.format(
         output_feature['type'],
         output_feature['name']
     ))
-    with tf.variable_scope(output_feature['name']):
+    with tf.compat.v1.variable_scope(output_feature['name']):
         feature_class = get_from_registry(
             output_feature['type'],
             output_type_registry
@@ -93,3 +96,22 @@ def build_single_output(output_feature, feature_hidden, feature_hidden_size,
             **kwargs
         )
     return weighted_train_mean_loss, weighted_eval_loss, output_tensors
+
+
+def get_all_measures_names(output_features):
+    all_measures_names = {}
+    for output_feature in output_features:
+        all_measures_names[output_feature['name']] = get_measures_names(
+            output_feature['type']
+        )
+    all_measures_names['combined'] = [LOSS, ACCURACY]
+    return all_measures_names
+
+
+def get_measures_names(feature_type):
+    output_config = output_type_registry[feature_type].output_config
+    measures_names = []
+    for stat, config in output_config.items():
+        if config['type'] == MEASURE:
+            measures_names.append(stat)
+    return measures_names

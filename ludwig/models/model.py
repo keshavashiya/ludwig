@@ -22,22 +22,19 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
-import json
 import logging
 import os
 import re
 import signal
 import sys
+import threading
 import time
 from collections import OrderedDict
 
 import numpy as np
 import tensorflow as tf
-from tabulate import tabulate
-from tensorflow.python import debug as tf_debug
-from tqdm import tqdm
-
 from ludwig.constants import *
+from ludwig.contrib import contrib_command
 from ludwig.features.feature_registries import output_type_registry
 from ludwig.features.feature_utils import SEQUENCE_TYPES
 from ludwig.globals import MODEL_HYPERPARAMETERS_FILE_NAME
@@ -52,20 +49,25 @@ from ludwig.models.modules.loss_modules import regularizer_registry
 from ludwig.models.modules.measure_modules import get_improved_fun
 from ludwig.models.modules.measure_modules import get_initial_validation_value
 from ludwig.models.modules.optimization_modules import optimize
-from ludwig.models.outputs import build_outputs
+from ludwig.models.outputs import build_outputs, get_all_measures_names, \
+    get_measures_names
 from ludwig.utils import time_utils
 from ludwig.utils.batcher import Batcher
 from ludwig.utils.batcher import BucketedBatcher
 from ludwig.utils.batcher import DistributedBatcher
-from ludwig.utils.data_utils import load_json
-from ludwig.utils.data_utils import load_object
-from ludwig.utils.data_utils import save_object
+from ludwig.utils.data_utils import load_json, save_json
 from ludwig.utils.defaults import default_random_seed
 from ludwig.utils.defaults import default_training_params
-from ludwig.utils.math_utils import learning_rate_warmup
+from ludwig.utils.math_utils import learning_rate_warmup_distributed, \
+    learning_rate_warmup
 from ludwig.utils.misc import set_random_seed
 from ludwig.utils.misc import sum_dicts
 from ludwig.utils.tf_utils import get_tf_config
+from tabulate import tabulate
+from tensorflow.python import debug as tf_debug
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 class Model:
@@ -85,20 +87,20 @@ class Model:
             debug=False,
             **kwargs
     ):
-        self.horovod = None
+        self._horovod = None
         if use_horovod:
             import horovod.tensorflow
-            self.horovod = horovod.tensorflow
+            self._horovod = horovod.tensorflow
             from mpi4py import MPI
-            self.comm = MPI.COMM_WORLD
+            self._comm = MPI.COMM_WORLD
 
-        self.debug = debug
-        self.weights_save_path = None
-        self.hyperparameters = {}
-        self.session = None
+        self._debug = debug
+        self._weights_save_path = None
+        self._hyperparameters = {}
+        self._session = None
 
-        self.epochs = None
-        self.received_sigint = False
+        self._epochs = None
+        self._received_sigint = False
 
         self.__build(
             input_features,
@@ -120,57 +122,59 @@ class Model:
             random_seed,
             **kwargs
     ):
-        self.hyperparameters['input_features'] = input_features
-        self.hyperparameters['output_features'] = output_features
-        self.hyperparameters['combiner'] = combiner
-        self.hyperparameters['training'] = training
-        self.hyperparameters['preprocessing'] = preprocessing
-        self.hyperparameters['random_seed'] = random_seed
-        self.hyperparameters.update(kwargs)
+        self._hyperparameters['input_features'] = input_features
+        self._hyperparameters['output_features'] = output_features
+        self._hyperparameters['combiner'] = combiner
+        self._hyperparameters[TRAINING] = training
+        self._hyperparameters['preprocessing'] = preprocessing
+        self._hyperparameters['random_seed'] = random_seed
+        self._hyperparameters.update(kwargs)
 
-        if self.horovod:
-            self.horovod.init()
+        if self._horovod:
+            self._horovod.init()
 
-        tf.reset_default_graph()
+        tf.compat.v1.reset_default_graph()
         graph = tf.Graph()
         with graph.as_default():
             # ================ Setup ================
-            tf.set_random_seed(random_seed)
+            tf.compat.v1.set_random_seed(random_seed)
 
-            self.global_step = tf.Variable(0, trainable=False)
-            self.regularization_lambda = tf.placeholder(
+            self._global_step = tf.Variable(0, trainable=False)
+            self._regularization_lambda = tf.compat.v1.placeholder(
                 tf.float32,
                 name='regularization_lambda'
             )
             regularizer = regularizer_registry[training['regularizer']]
-            self.regularizer = regularizer(self.regularization_lambda)
+            self._regularizer = regularizer(self._regularization_lambda)
 
-            self.learning_rate = tf.placeholder(
+            self._learning_rate = tf.compat.v1.placeholder(
                 tf.float32,
                 name='learning_rate'
             )
-            self.dropout_rate = tf.placeholder(tf.float32, name='dropout_rate')
-            self.is_training = tf.placeholder(tf.bool, [], name='is_training')
+            self._dropout_rate = tf.compat.v1.placeholder(tf.float32,
+                                                          name='dropout_rate')
+            self._is_training = tf.compat.v1.placeholder(tf.bool, [],
+                                                         name='is_training')
 
             # ================ Inputs ================
             feature_encodings = build_inputs(
                 input_features,
-                self.regularizer,
-                self.dropout_rate,
-                is_training=self.is_training
+                self._regularizer,
+                self._dropout_rate,
+                is_training=self._is_training
             )
 
             for fe_name, fe_properties in feature_encodings.items():
                 setattr(self, fe_name, fe_properties['placeholder'])
 
             # ================ Model ================
-            logging.debug('- Combiner {}'.format(combiner['type']))
+            logger.debug('- Combiner {}'.format(combiner['type']))
             build_combiner = get_build_combiner(combiner['type'])(**combiner)
             hidden, hidden_size = build_combiner(
                 feature_encodings,
-                self.regularizer,
-                self.dropout_rate,
-                is_training=self.is_training,
+                self._regularizer,
+                self._dropout_rate,
+                is_training=self._is_training,
                 **kwargs
             )
 
@@ -179,15 +183,15 @@ class Model:
                 output_features,
                 hidden,
                 hidden_size,
-                regularizer=self.regularizer,
-                dropout_rate=self.dropout_rate,
-                is_training=self.is_training
+                regularizer=self._regularizer,
+                dropout_rate=self._dropout_rate,
+                is_training=self._is_training
             )
 
             (
-                self.train_reg_mean_loss,
-                self.eval_combined_loss,
-                self.regularization_loss,
+                self._train_reg_mean_loss,
+                self._eval_combined_loss,
+                self._regularization_loss,
                 output_tensors
             ) = outs
 
@@ -195,45 +199,49 @@ class Model:
                 setattr(self, ot_name, ot)
 
             # ================ Optimizer ================
-            self.optimize, self.learning_rate = optimize(
-                self.train_reg_mean_loss,
+            self._optimize, self._learning_rate = optimize(
+                self._train_reg_mean_loss,
                 training,
-                self.learning_rate,
-                self.global_step,
-                self.horovod
+                self._learning_rate,
+                self._global_step,
+                self._horovod
             )
 
-            tf.summary.scalar('train_reg_mean_loss', self.train_reg_mean_loss)
+            tf.compat.v1.summary.scalar(
+                'combined/batch_train_reg_mean_loss',
+                self._train_reg_mean_loss
+            )
 
-            self.merged_summary = tf.summary.merge_all()
-            self.graph = graph
-            self.graph_initialize = tf.global_variables_initializer()
-            if self.horovod:
-                self.broadcast_op = self.horovod.broadcast_global_variables(0)
-            self.saver = tf.train.Saver()
+            self._merged_summary = tf.compat.v1.summary.merge_all()
+            self._graph = graph
+            self._graph_initialize = tf.compat.v1.global_variables_initializer()
+            if self._horovod:
+                self._broadcast_op = self._horovod.broadcast_global_variables(
+                    0)
+            self._saver = tf.compat.v1.train.Saver()
 
     def initialize_session(self, gpus=None, gpu_fraction=1):
-        if self.session is None:
+        if self._session is None:
 
-            self.session = tf.Session(
-                config=get_tf_config(gpus, gpu_fraction, self.horovod),
-                graph=self.graph
+            self._session = tf.compat.v1.Session(
+                config=get_tf_config(gpus, gpu_fraction, self._horovod),
+                graph=self._graph
             )
-            self.session.run(self.graph_initialize)
+            self._session.run(self._graph_initialize)
 
-            if self.debug:
-                session = tf_debug.LocalCLIDebugWrapperSession(self.session)
+            if self._debug:
+                session = tf_debug.LocalCLIDebugWrapperSession(self._session)
                 session.add_tensor_filter(
                     'has_inf_or_nan',
                     tf_debug.has_inf_or_nan
                 )
 
-        return self.session
+        return self._session
 
     def close_session(self):
-        if self.session is not None:
-            self.session.close()
-            self.session = None
+        if self._session is not None:
+            self._session.close()
+            self._session = None
 
     def feed_dict(
             self,
@@ -244,13 +252,13 @@ class Model:
             dropout_rate=default_training_params['dropout_rate'],
             is_training=True
     ):
-        input_features = self.hyperparameters['input_features']
-        output_features = self.hyperparameters['output_features']
+        input_features = self._hyperparameters['input_features']
+        output_features = self._hyperparameters['output_features']
         feed_dict = {
-            self.is_training: is_training,
-            self.regularization_lambda: regularization_lambda,
-            self.learning_rate: learning_rate,
-            self.dropout_rate: dropout_rate
+            self._is_training: is_training,
+            self._regularization_lambda: regularization_lambda,
+            self._learning_rate: learning_rate,
+            self._dropout_rate: dropout_rate
         }
         for input_feature in input_features:
             feed_dict[getattr(self, input_feature['name'])] = batch[
@@ -260,6 +268,26 @@ class Model:
                 feed_dict[getattr(self, output_feature['name'])] = batch[
                     output_feature['name']]
         return feed_dict
+
+    @classmethod
+    def add_tensorboard_epoch_summary(cls, stats, prefix, train_writer, step):
+        if not train_writer:
+            return
+        summaries = []
+        for feature_name, output_feature in stats.items():
+            for metric in output_feature:
+                metric_tag = "{}/epoch_{}_{}".format(
+                    feature_name, prefix, metric
+                )
+                metric_val = output_feature[metric][-1]
+                summaries.append(
+                    tf.compat.v1.Summary.Value(
+                        tag=metric_tag,
+                        simple_value=metric_val
+                    )
+                )
+        summary = tf.compat.v1.Summary(value=summaries)
+        train_writer.add_summary(summary, step)
 
     def train(
             self,
@@ -273,6 +301,7 @@ class Model:
             epochs=100,
             learning_rate=0.001,
             batch_size=128,
+            eval_batch_size=0,
             bucketing_field=None,
             dropout_rate=0.0,
             early_stop=20,
@@ -283,7 +312,7 @@ class Model:
             increase_batch_size_on_plateau_patience=5,
             increase_batch_size_on_plateau_rate=2,
             increase_batch_size_on_plateau_max=512,
-            learning_rate_warmup_epochs=5,  # used when training with Horovod
+            learning_rate_warmup_epochs=1,
             resume=False,
             skip_save_model=False,
             skip_save_progress=False,
@@ -311,9 +340,11 @@ class Model:
         :param learning_rate: Learning rate for the algorithm, represents how
                much to scale the gradients by
         :type learning_rate: Integer
-        :param batch_size: Size of batch to pass to the machine learning model.
+        :param batch_size: Size of batch to pass to the model for training.
         :type batch_size: Integer
-        :param bucketing_field:when batching, buckets datapoints based the
+        :param batch_size: Size of batch to pass to the model for evaluation.
+        :type batch_size: Integer
+        :param bucketing_field: when batching, buckets datapoints based the
                length of a field together. Bucketing on text length speeds up
                training of RNNs consistently, 30% in some cases
         :type bucketing_field:
@@ -378,17 +409,57 @@ class Model:
         :type: Float
         """
         # ====== General setup =======
-        output_features = self.hyperparameters['output_features']
-        self.epochs = epochs
-        digits_per_epochs = len(str(self.epochs))
-        self.received_sigint = False
-        signal.signal(signal.SIGINT, self.set_epochs_to_1_or_quit)
+        output_features = self._hyperparameters['output_features']
+        self._epochs = epochs
+        digits_per_epochs = len(str(self._epochs))
+        self._received_sigint = False
+        # Only use signals when on the main thread to avoid issues with CherryPy: https://github.com/uber/ludwig/issues/286
+        if threading.current_thread() == threading.main_thread():
+            signal.signal(signal.SIGINT, self.set_epochs_to_1_or_quit)
         should_validate = validation_set is not None and validation_set.size > 0
-        stat_names = self.get_stat_names(output_features)
-        if self.horovod:
-            learning_rate *= self.horovod.size()
+        if eval_batch_size < 1:
+            eval_batch_size = batch_size
+        stat_names = get_all_measures_names(output_features)
+        if self._horovod:
+            learning_rate *= self._horovod.size()
+
+        # check if validation_field is valid
+        valid_validation_field = False
+        validation_output_feature_name = None
+        if validation_field == 'combined':
+            valid_validation_field = True
+            validation_output_feature_name = 'combined'
+        else:
+            for output_feature in output_features:
+                if validation_field == output_feature['name']:
+                    valid_validation_field = True
+                    validation_output_feature_name = output_feature['name']
+        if not valid_validation_field:
+            raise ValueError(
+                'The specificed validation_field {} is not valid.'
+                'Available ones are: {}'.format(
+                    validation_field,
+                    [of['name'] for of in output_features] + ['combined']
+                )
+            )
+
+        # check if validation_measure is valid
+        valid_validation_measure = validation_measure in stat_names[
+            validation_output_feature_name
+        ]
+        if not valid_validation_measure:
+            raise ValueError(
+                'The specificed measure {} is not valid.'
+                'Available measures for {} output features are: {}'.format(
+                    validation_measure,
+                    validation_output_feature_name,
+                    stat_names[validation_output_feature_name]
+                )
+            )
 
         # ====== Setup file names =======
+        if is_on_master():
+            os.makedirs(save_path, exist_ok=True)
         model_weights_path = os.path.join(save_path, MODEL_WEIGHTS_FILE_NAME)
         model_weights_progress_path = os.path.join(
             save_path,
@@ -402,14 +473,18 @@ class Model:
         # ====== Setup session =======
         session = self.initialize_session(gpus, gpu_fraction)
 
+        if self._weights_save_path:
+            self.restore(session, self._weights_save_path)
+
+        train_writer = None
         if is_on_master():
             if not skip_save_log:
-                train_writer = tf.summary.FileWriter(
+                train_writer = tf.compat.v1.summary.FileWriter(
                     os.path.join(save_path, 'log', 'train'),
-                    session.graph
+                    session._graph
                 )
 
-        if self.debug:
+        if self._debug:
             session = tf_debug.LocalCLIDebugWrapperSession(session)
             session.add_tensor_filter(
                 'has_inf_or_nan',
@@ -453,8 +528,8 @@ class Model:
             )
 
         # horovod broadcasting after init or restore
-        if self.horovod:
-            session.run(self.broadcast_op)
+        if self._horovod:
+            session.run(self._broadcast_op)
 
         set_random_seed(random_seed)
         batcher = self.initialize_batcher(
@@ -464,11 +539,11 @@ class Model:
         )
 
         # ================ Training Loop ================
-        while progress_tracker.epoch < self.epochs:
+        while progress_tracker.epoch < self._epochs:
             # epoch init
             start_time = time.time()
             if is_on_master():
-                logging.info(
+                logger.info(
                     '\nEpoch {epoch:{digits}d}'.format(
                         epoch=progress_tracker.epoch + 1,
                         digits=digits_per_epochs
@@ -479,7 +554,7 @@ class Model:
 
             # ================ Train ================
             if is_on_master():
-                bar = tqdm(
+                progress_bar = tqdm(
                     desc='Training',
                     total=batcher.steps_per_epoch,
                     file=sys.stdout,
@@ -490,20 +565,27 @@ class Model:
             while not batcher.last_batch():
                 batch = batcher.next_batch()
 
-                if self.horovod:
+                if self._horovod:
+                    current_learning_rate = learning_rate_warmup_distributed(
+                        progress_tracker.learning_rate,
+                        progress_tracker.epoch,
+                        learning_rate_warmup_epochs,
+                        self._horovod.size(),
+                        batcher.step,
+                        batcher.steps_per_epoch
+                    ) * self._horovod.size()
+                else:
                     current_learning_rate = learning_rate_warmup(
                         progress_tracker.learning_rate,
                         progress_tracker.epoch,
                         learning_rate_warmup_epochs,
-                        self.horovod.size(),
+                        batcher.step,
                         batcher.steps_per_epoch
                     )
-                else:
-                    current_learning_rate = progress_tracker.learning_rate
 
-                readout_nodes = {'optimize': self.optimize}
+                readout_nodes = {'optimize': self._optimize}
                 if not skip_save_log:
-                    readout_nodes['summary'] = self.merged_summary
+                    readout_nodes['summary'] = self._merged_summary
 
                 output_values = session.run(
                     readout_nodes,
@@ -524,11 +606,11 @@ class Model:
 
                 progress_tracker.steps += 1
                 if is_on_master():
-                    bar.update(1)
+                    progress_bar.update(1)
 
             # post training
             if is_on_master():
-                bar.close()
+                progress_bar.close()
 
             progress_tracker.epoch += 1
             batcher.reset()  # todo this may be useless, doublecheck
@@ -546,13 +628,25 @@ class Model:
             self.evaluation(
                 session,
                 training_set,
-                'train',
+                TRAINING,
                 regularization_lambda,
                 progress_tracker.train_stats,
                 tables,
-                progress_tracker.batch_size,
+                eval_batch_size,
                 bucketing_field
             )
+
+            if is_on_master() and not skip_save_log:
+                # Add a graph within TensorBoard showing the overall loss and accuracy tracked in
+                # the same way as in the CLI. For each one, progress_tracker.steps has already
+                # been incremented before, so in order to write on the previous summary, we need
+                # to use -1
+                self.add_tensorboard_epoch_summary(
+                    progress_tracker.train_stats,
+                    "training",
+                    train_writer,
+                    progress_tracker.epoch
+                )
 
             if validation_set is not None and validation_set.size > 0:
                 # eval measures on validation set
@@ -563,28 +657,50 @@ class Model:
                     regularization_lambda,
                     progress_tracker.vali_stats,
                     tables,
-                    progress_tracker.batch_size,
+                    eval_batch_size,
                     bucketing_field
                 )
+                if is_on_master() and not skip_save_log:
+                    # Add a graph within TensorBoard showing the overall loss and accuracy tracked in
+                    # the same way as in the CLI. For each one, progress_tracker.steps has already
+                    # been incremented before, so in order to write on the previous summary, we need
+                    # to use -1
+                    self.add_tensorboard_epoch_summary(
+                        progress_tracker.vali_stats,
+                        "validation",
+                        train_writer,
+                        progress_tracker.epoch
+                    )
 
             if test_set is not None and test_set.size > 0:
                 # eval measures on test set
                 self.evaluation(
                     session,
                     test_set,
-                    'test',
+                    TEST,
                     regularization_lambda,
                     progress_tracker.test_stats,
                     tables,
-                    progress_tracker.batch_size,
+                    eval_batch_size,
                     bucketing_field
                 )
+                if is_on_master() and not skip_save_log:
+                    # Add a graph within TensorBoard showing the overall loss and accuracy tracked in
+                    # the same way as in the CLI. For each one, progress_tracker.steps has already
+                    # been incremented before, so in order to write on the previous summary, we need
+                    # to use -1
+                    self.add_tensorboard_epoch_summary(
+                        progress_tracker.test_stats,
+                        "test",
+                        train_writer,
+                        progress_tracker.epoch
+                    )
 
             # mbiu and end of epoch prints
             elapsed_time = (time.time() - start_time) * 1000.0
 
             if is_on_master():
-                logging.info('Took {time}'.format(
+                logger.info('Took {time}'.format(
                     time=time_utils.strdelta(elapsed_time)))
 
             # stat prints
@@ -595,7 +711,7 @@ class Model:
                          len(output_features) > 1)
                 ):
                     if is_on_master():
-                        logging.info(
+                        logger.info(
                             tabulate(
                                 table,
                                 headers='firstrow',
@@ -630,7 +746,7 @@ class Model:
                     if not skip_save_model:
                         self.save_weights(session, model_weights_path)
                         self.save_hyperparameters(
-                            self.hyperparameters,
+                            self._hyperparameters,
                             model_hyperparameters_path
                         )
 
@@ -638,21 +754,24 @@ class Model:
             if is_on_master():
                 if not skip_save_progress:
                     self.save_weights(session, model_weights_progress_path)
-                    save_object(
+                    progress_tracker.save(
                         os.path.join(
                             save_path,
                             TRAINING_PROGRESS_FILE_NAME
-                        ),
-                        progress_tracker
+                        )
                     )
                     if skip_save_model:
                         self.save_hyperparameters(
-                            self.hyperparameters,
+                            self._hyperparameters,
                             model_hyperparameters_path
                         )
 
             if is_on_master():
-                logging.info('')
+                contrib_command("train_epoch_end", progress_tracker)
+                logger.info('')
+
+        if train_writer is not None:
+            train_writer.close()
 
         return (
             progress_tracker.train_stats,
@@ -675,7 +794,7 @@ class Model:
         batcher = self.initialize_batcher(dataset, batch_size, bucketing_field)
 
         # training step loop
-        bar = tqdm(
+        progress_bar = tqdm(
             desc='Trainining online',
             total=batcher.steps_per_epoch,
             file=sys.stdout,
@@ -686,7 +805,7 @@ class Model:
             batch = batcher.next_batch()
 
             _ = session.run(
-                [self.optimize],
+                [self._optimize],
                 feed_dict=self.feed_dict(
                     batch,
                     regularization_lambda=regularization_lambda,
@@ -695,9 +814,9 @@ class Model:
                     is_training=True
                 )
             )
-            bar.update(1)
+            progress_bar.update(1)
 
-        bar.close()
+        progress_bar.close()
 
     def evaluation(
             self,
@@ -720,15 +839,15 @@ class Model:
             name=dataset_name
         )
 
-        for output_feature in self.hyperparameters['output_features']:
-            field_name = output_feature['name']
-            scores = [dataset_name]
+        for output_feature in self._hyperparameters['output_features']:
+            of_name = output_feature['name']
+            table_row = [dataset_name]
 
-            for stat in stats[field_name]:
-                stats[field_name][stat].append(results[field_name][stat])
-                scores.append(results[field_name][stat])
+            for measure in get_measures_names(output_feature['type']):
+                stats[of_name][measure].append(results[of_name][measure])
+                table_row.append(results[of_name][measure])
 
-            tables[field_name].append(scores)
+            tables[of_name].append(table_row)
 
         stats['combined'][LOSS].append(results['combined'][LOSS])
         stats['combined'][ACCURACY].append(results['combined'][ACCURACY])
@@ -762,10 +881,10 @@ class Model:
         set_size = dataset.size
         if set_size == 0:
             if is_on_master():
-                logging.warning('No datapoints to evaluate on.')
+                logger.warning('No datapoints to evaluate on.')
             return output_stats
         seq_set_size = {output_feature['name']: {} for output_feature in
-                        self.hyperparameters['output_features'] if
+                        self._hyperparameters['output_features'] if
                         output_feature['type'] in SEQUENCE_TYPES}
 
         batcher = self.initialize_batcher(
@@ -776,7 +895,7 @@ class Model:
         )
 
         if is_on_master():
-            bar = tqdm(
+            progress_bar = tqdm(
                 desc='Evaluation' if name is None
                 else 'Evaluation {0: <5.5}'.format(name),
                 total=batcher.steps_per_epoch,
@@ -804,12 +923,12 @@ class Model:
                 result
             )
             if is_on_master():
-                bar.update(1)
+                progress_bar.update(1)
 
         if is_on_master():
-            bar.close()
+            progress_bar.close()
 
-        if self.horovod:
+        if self._horovod:
             output_stats, seq_set_size = self.merge_workers_outputs(
                 output_stats,
                 seq_set_size
@@ -825,8 +944,8 @@ class Model:
 
         if 'combined' in output_stats and LOSS in output_stats['combined']:
             regularization = session.run(
-                [self.regularization_loss],
-                feed_dict={self.regularization_lambda: regularization_lambda}
+                [self._regularization_loss],
+                feed_dict={self._regularization_lambda: regularization_lambda}
             )[0]
             output_stats['combined'][LOSS] += regularization
 
@@ -834,8 +953,8 @@ class Model:
 
     def merge_workers_outputs(self, output_stats, seq_set_size):
         # gather outputs from all workers
-        all_workers_output_stats = self.comm.allgather(output_stats)
-        all_workers_seq_set_size = self.comm.allgather(seq_set_size)
+        all_workers_output_stats = self._comm.allgather(output_stats)
+        all_workers_seq_set_size = self._comm.allgather(seq_set_size)
 
         # merge them into a single one
         merged_output_stats = sum_dicts(
@@ -854,8 +973,9 @@ class Model:
             tensor_names,
             bucketing_field=None
     ):
-        output_nodes = {tensor_name: self.graph.get_tensor_by_name(tensor_name)
-                        for tensor_name in tensor_names}
+        output_nodes = {
+            tensor_name: self._graph.get_tensor_by_name(tensor_name)
+            for tensor_name in tensor_names}
         collected_tensors = {tensor_name: [] for tensor_name in tensor_names}
 
         batcher = self.initialize_batcher(
@@ -865,7 +985,7 @@ class Model:
             should_shuffle=False
         )
 
-        bar = tqdm(
+        progress_bar = tqdm(
             desc='Collecting Tensors',
             total=batcher.steps_per_epoch,
             file=sys.stdout,
@@ -886,14 +1006,14 @@ class Model:
                 for row in result[tensor_name]:
                     collected_tensors[tensor_name].append(row)
 
-            bar.update(1)
+            progress_bar.update(1)
 
-        bar.close()
+        progress_bar.close()
 
         return collected_tensors
 
     def get_output_nodes(self, collect_predictions, only_predictions=False):
-        output_features = self.hyperparameters['output_features']
+        output_features = self._hyperparameters['output_features']
         output_nodes = {}
 
         for output_feature in output_features:
@@ -916,13 +1036,13 @@ class Model:
         if not only_predictions:
             output_nodes['eval_combined_loss'] = getattr(
                 self,
-                'eval_combined_loss'
+                '_eval_combined_loss'
             )
 
         return output_nodes
 
     def get_outputs_stats(self):
-        output_features = self.hyperparameters['output_features']
+        output_features = self._hyperparameters['output_features']
         output_stats = OrderedDict()
 
         for output_feature in output_features:
@@ -949,10 +1069,10 @@ class Model:
             only_predictions,
             result
     ):
-        output_features = self.hyperparameters['output_features']
+        output_features = self._hyperparameters['output_features']
         combined_correct_predictions = None
 
-        for i, output_feature in enumerate(output_features):
+        for output_feature in output_features:
             field_name = output_feature['name']
             feature_type = output_feature['type']
             output_config = output_type_registry[feature_type].output_config
@@ -1021,7 +1141,7 @@ class Model:
             collect_predictions,
             only_predictions
     ):
-        output_features = self.hyperparameters['output_features']
+        output_features = self._hyperparameters['output_features']
 
         for i, output_feature in enumerate(output_features):
             feature_type = output_feature['type']
@@ -1134,10 +1254,10 @@ class Model:
                 if not skip_save_model:
                     self.save_weights(session, model_weights_path)
                     self.save_hyperparameters(
-                        self.hyperparameters,
+                        self._hyperparameters,
                         model_hyperparameters_path
                     )
-                    logging.info(
+                    logger.info(
                         'Validation {} on {} improved, model saved'.format(
                             validation_measure,
                             validation_field
@@ -1149,7 +1269,7 @@ class Model:
         )
         if progress_tracker.last_improvement != 0:
             if is_on_master():
-                logging.info(
+                logger.info(
                     'Last improvement of {} on {} happened '
                     '{} epoch{} ago'.format(
                         validation_measure,
@@ -1182,7 +1302,7 @@ class Model:
         if early_stop > 0:
             if progress_tracker.last_improvement >= early_stop:
                 if is_on_master():
-                    logging.info(
+                    logger.info(
                         "\nEARLY STOPPING due to lack of validation improvement"
                         ", it has been {0} epochs since last validation "
                         "accuracy improvement\n".format(
@@ -1197,19 +1317,19 @@ class Model:
             self,
             dataset,
             batch_size,
-            only_predictions=False,
+            evaluate_performance=True,
             gpus=None,
             gpu_fraction=1,
             **kwargs
     ):
-        if self.session is None:
+        if self._session is None:
             session = self.initialize_session(gpus, gpu_fraction)
 
             # load parameters
-            if self.weights_save_path:
-                self.restore(session, self.weights_save_path)
+            if self._weights_save_path:
+                self.restore(session, self._weights_save_path)
         else:
-            session = self.session
+            session = self._session
 
         # predict
         predict_stats = self.batch_evaluation(
@@ -1218,7 +1338,7 @@ class Model:
             batch_size,
             is_training=False,
             collect_predictions=True,
-            only_predictions=only_predictions
+            only_predictions=not evaluate_performance
         )
 
         return predict_stats
@@ -1232,19 +1352,20 @@ class Model:
             gpu_fraction=1,
             **kwargs
     ):
-        if self.session is None:
+        if self._session is None:
             session = self.initialize_session(gpus, gpu_fraction)
 
             # load parameters
-            if self.weights_save_path:
-                self.restore(session, self.weights_save_path)
+            if self._weights_save_path:
+                self.restore(session, self._weights_save_path)
         else:
-            session = self.session
+            session = self._session
 
         # get operation names
-        operation_names = set(
-            [t.name for op in self.graph.get_operations() for t in op.values()]
-        )
+        operation_names = {
+            t.name for op in self._graph.get_operations() for t in op.values()
+        }
+
         for tensor_name in tensor_names:
             if tensor_name not in operation_names:
                 raise ValueError(
@@ -1269,18 +1390,18 @@ class Model:
             gpu_fraction=1,
             **kwargs
     ):
-        if self.session is None:
+        if self._session is None:
             session = self.initialize_session(gpus, gpu_fraction)
 
             # load parameters
-            if self.weights_save_path:
-                self.restore(session, self.weights_save_path)
+            if self._weights_save_path:
+                self.restore(session, self._weights_save_path)
         else:
-            session = self.session
+            session = self._session
 
-        operation_names = set(
-            [t.name for op in self.graph.get_operations() for t in op.values()]
-        )
+        operation_names = {
+            t.name for op in self._graph.get_operations() for t in op.values()
+        }
         for tensor_name in tensor_names:
             if tensor_name not in operation_names:
                 raise ValueError(
@@ -1290,14 +1411,15 @@ class Model:
 
         # collect tensors
         collected_tensors = {
-            tensor_name: session.run(self.graph.get_tensor_by_name(tensor_name))
+            tensor_name: session.run(
+                self._graph.get_tensor_by_name(tensor_name))
             for tensor_name in tensor_names
         }
 
         return collected_tensors
 
     def save_weights(self, session, save_path):
-        self.weights_save_path = self.saver.save(session, save_path)
+        self._weights_save_path = self._saver.save(session, save_path)
 
     def save_hyperparameters(self, hyperparameters, save_path):
         # removing pretrained embeddings paths from hyperparameters
@@ -1309,50 +1431,100 @@ class Model:
                         local_hyperparamters['output_features']):
             if 'pretrained_embeddings' in feature:
                 feature['pretrained_embeddings'] = None
-        with open(save_path, 'w') as fp:
-            json.dump(hyperparameters, fp, sort_keys=True, indent=4)
+        save_json(save_path, hyperparameters, sort_keys=True, indent=4)
+
+    def save_savedmodel(self, save_path):
+
+        if self._session is None:
+            logger.warning(
+                "The model has no initialized session."
+                "Initializing a news session and restoring the weights "
+                "of the model (if a weights path has been specified)."
+            )
+            self.initialize_session()
+            if self._weights_save_path:
+                self.restore(self._session, self._weights_save_path)
+
+        inputs = {}
+        outputs = {}
+
+        for feature in self._hyperparameters['input_features']:
+            inputs[feature['name']] = getattr(self, feature['name'])
+
+        for feature in self._hyperparameters['output_features']:
+            outputs['predictions_' + feature['name']] = getattr(
+                self, 'predictions_' + feature['name']
+            )
+            if hasattr(self, 'probabilities_' + feature['name']):
+                outputs['probabilities_' + feature['name']] = getattr(
+                    self, 'probabilities_' + feature['name']
+                )
+            if hasattr(self, 'probability_' + feature['name']):
+                outputs['probability_' + feature['name']] = getattr(
+                    self, 'probability_' + feature['name']
+                )
+
+        builder = tf.compat.v1.saved_model.builder.SavedModelBuilder(save_path)
+
+        with self._session as session:
+            signature = tf.compat.v1.saved_model.signature_def_utils.predict_signature_def(
+                inputs=inputs,
+                outputs=outputs
+            )
+
+            builder.add_meta_graph_and_variables(
+                sess=session,
+                tags=[tf.saved_model.SERVING],
+                signature_def_map={
+                    tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY:
+                        signature
+                })
+
+            builder.save()
 
     def restore(self, session, weights_path):
-        self.saver.restore(session, weights_path)
+        self._saver.restore(session, weights_path)
 
     @staticmethod
-    def load(load_path, use_horovod=False):
+    def load(load_path, gpus=None, gpu_fraction=1, use_horovod=False):
         hyperparameter_file = os.path.join(
             load_path,
             MODEL_HYPERPARAMETERS_FILE_NAME
         )
         hyperparameters = load_json(hyperparameter_file)
         model = Model(use_horovod=use_horovod, **hyperparameters)
-        model.weights_save_path = os.path.join(
+        model._weights_save_path = os.path.join(
             load_path,
             MODEL_WEIGHTS_FILE_NAME
         )
+        model.initialize_session(gpus, gpu_fraction)
+        model.restore(model._session, model._weights_save_path)
         return model
 
     def set_epochs_to_1_or_quit(self, signum, frame):
-        if not self.received_sigint:
-            self.epochs = 1
-            self.received_sigint = True
-            logging.critical(
+        if not self._received_sigint:
+            self._epochs = 1
+            self._received_sigint = True
+            logger.critical(
                 '\nReceived SIGINT, will finish this epoch and then conclude '
                 'the training'
             )
-            logging.critical(
+            logger.critical(
                 'Send another SIGINT to immediately interrupt the process'
             )
         else:
-            logging.critical('\nReceived a second SIGINT, will now quit')
+            logger.critical('\nReceived a second SIGINT, will now quit')
             sys.exit(1)
 
     def quit_training(self, signum, frame):
-        logging.critical('Received SIGQUIT, will kill training')
+        logger.critical('Received SIGQUIT, will kill training')
         sys.exit(1)
 
     def resume_training(self, save_path, model_weights_path):
         if is_on_master():
-            logging.info('Resuming training of model: {0}'.format(save_path))
-        self.weights_save_path = model_weights_path
-        progress_tracker = load_object(
+            logger.info('Resuming training of model: {0}'.format(save_path))
+        self._weights_save_path = model_weights_path
+        progress_tracker = ProgressTracker.load(
             os.path.join(
                 save_path,
                 TRAINING_PROGRESS_FILE_NAME
@@ -1388,21 +1560,6 @@ class Model:
 
         return train_stats, vali_stats, test_stats
 
-    def get_stat_names(self, output_features):
-        stat_names = {}
-        for output_feature in output_features:
-            field_name = output_feature['name']
-            output_config = output_type_registry[
-                output_feature['type']].output_config
-
-            for stat, config in output_config.items():
-                if config['type'] == MEASURE:
-                    stats = stat_names.get(field_name, [])
-                    stats.append(stat)
-                    stat_names[field_name] = stats
-        stat_names['combined'] = [LOSS, ACCURACY]
-        return stat_names
-
     def initialize_batcher(
             self,
             dataset,
@@ -1411,17 +1568,17 @@ class Model:
             should_shuffle=True,
             ignore_last=False
     ):
-        if self.horovod:
+        if self._horovod:
             batcher = DistributedBatcher(
                 dataset,
-                self.horovod.rank(),
-                self.horovod,
+                self._horovod.rank(),
+                self._horovod,
                 batch_size,
                 should_shuffle=should_shuffle,
                 ignore_last=ignore_last
             )
         elif bucketing_field is not None:
-            input_features = self.hyperparameters['input_features']
+            input_features = self._hyperparameters['input_features']
             bucketing_feature = [
                 feature for feature in input_features if
                 feature['name'] == bucketing_field
@@ -1439,7 +1596,7 @@ class Model:
             if 'preprocessing' in bucketing_feature:
                 trim_side = bucketing_feature['preprocessing']['padding']
             else:
-                trim_side = self.hyperparameters['preprocessing'][
+                trim_side = self._hyperparameters['preprocessing'][
                     bucketing_feature['type']]['padding']
 
             batcher = BucketedBatcher(
@@ -1490,7 +1647,7 @@ class Model:
             if (progress_tracker.num_reductions_lr >=
                     reduce_learning_rate_on_plateau):
                 if is_on_master():
-                    logging.info(
+                    logger.info(
                         'It has been ' +
                         str(progress_tracker.last_improvement) +
                         ' epochs since last validation accuracy improvement '
@@ -1500,7 +1657,7 @@ class Model:
                     )
             else:
                 if is_on_master():
-                    logging.info(
+                    logger.info(
                         'PLATEAU REACHED, reducing learning rate '
                         'due to lack of validation improvement, it has been ' +
                         str(progress_tracker.last_improvement) +
@@ -1530,7 +1687,7 @@ class Model:
             if (progress_tracker.num_increases_bs >=
                     increase_batch_size_on_plateau):
                 if is_on_master():
-                    logging.info(
+                    logger.info(
                         'It has been ' +
                         str(progress_tracker.last_improvement) +
                         ' epochs since last validation accuracy improvement '
@@ -1542,7 +1699,7 @@ class Model:
             elif (progress_tracker.batch_size ==
                   increase_batch_size_on_plateau_max):
                 if is_on_master():
-                    logging.info(
+                    logger.info(
                         'It has been' +
                         str(progress_tracker.last_improvement) +
                         ' epochs since last validation accuracy improvement '
@@ -1554,7 +1711,7 @@ class Model:
                     )
             else:
                 if is_on_master():
-                    logging.info(
+                    logger.info(
                         'PLATEAU REACHED '
                         'increasing batch size due to lack of '
                         'validation improvement, it has been ' +
@@ -1586,13 +1743,14 @@ class ProgressTracker:
             num_increases_bs,
             train_stats,
             vali_stats,
-            test_stats
+            test_stats,
+            last_improvement=0
     ):
         self.batch_size = batch_size
         self.epoch = epoch
         self.steps = steps
         self.last_improvement_epoch = last_improvement_epoch
-        self.last_improvement = 0
+        self.last_improvement = last_improvement
         self.learning_rate = learning_rate
         self.best_valid_measure = best_valid_measure
         self.num_reductions_lr = num_reductions_lr
@@ -1600,6 +1758,14 @@ class ProgressTracker:
         self.train_stats = train_stats
         self.vali_stats = vali_stats
         self.test_stats = test_stats
+
+    def save(self, filepath):
+        save_json(filepath, self.__dict__)
+
+    @staticmethod
+    def load(filepath):
+        loaded = load_json(filepath)
+        return ProgressTracker(**loaded)
 
 
 def load_model_and_definition(model_dir, use_horovod=False):

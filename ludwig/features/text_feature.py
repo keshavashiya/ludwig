@@ -28,10 +28,13 @@ from ludwig.features.sequence_feature import SequenceOutputFeature
 from ludwig.utils.math_utils import softmax
 from ludwig.utils.metrics_utils import ConfusionMatrix
 from ludwig.utils.misc import set_default_value
+from ludwig.utils.misc import set_default_values
 from ludwig.utils.strings_utils import PADDING_SYMBOL
 from ludwig.utils.strings_utils import UNKNOWN_SYMBOL
 from ludwig.utils.strings_utils import build_sequence_matrix
 from ludwig.utils.strings_utils import create_vocabulary
+
+logger = logging.getLogger(__name__)
 
 
 class TextBaseFeature(BaseFeature):
@@ -40,10 +43,12 @@ class TextBaseFeature(BaseFeature):
         self.type = TEXT
 
     preprocessing_defaults = {
-        'char_format': 'characters',
+        'char_tokenizer': 'characters',
+        'char_vocab_file': None,
         'char_sequence_length_limit': 1024,
         'char_most_common': 70,
-        'word_format': 'space_punct',
+        'word_tokenizer': 'space_punct',
+        'word_vocab_file': None,
         'word_sequence_length_limit': 256,
         'word_most_common': 20000,
         'padding_symbol': PADDING_SYMBOL,
@@ -51,12 +56,11 @@ class TextBaseFeature(BaseFeature):
         'padding': 'right',
         'lowercase': True,
         'missing_value_strategy': FILL_WITH_CONST,
-        'fill_value': ''
+        'fill_value': UNKNOWN_SYMBOL
     }
 
     @staticmethod
-    def feature_meta(column, most_common_characters, most_common_words,
-                     lowercase):
+    def feature_meta(column, preprocessing_parameters):
         (
             char_idx2str,
             char_str2idx,
@@ -64,9 +68,11 @@ class TextBaseFeature(BaseFeature):
             char_max_len
         ) = create_vocabulary(
             column,
-            'characters',
-            num_most_frequent=most_common_characters,
-            lowercase=lowercase
+            tokenizer_type='characters',
+            num_most_frequent=preprocessing_parameters['char_most_common'],
+            lowercase=preprocessing_parameters['lowercase'],
+            unknown_symbol=preprocessing_parameters['unknown_symbol'],
+            padding_symbol=preprocessing_parameters['padding_symbol']
         )
         (
             word_idx2str,
@@ -75,9 +81,12 @@ class TextBaseFeature(BaseFeature):
             word_max_len
         ) = create_vocabulary(
             column,
-            'english_tokenize',
-            num_most_frequent=most_common_words,
-            lowercase=lowercase
+            tokenizer_type=preprocessing_parameters['word_tokenizer'],
+            num_most_frequent=preprocessing_parameters['word_most_common'],
+            lowercase=preprocessing_parameters['lowercase'],
+            vocab_file=preprocessing_parameters['word_vocab_file'],
+            unknown_symbol=preprocessing_parameters['unknown_symbol'],
+            padding_symbol=preprocessing_parameters['padding_symbol'],
         )
         return (
             char_idx2str,
@@ -93,10 +102,7 @@ class TextBaseFeature(BaseFeature):
     @staticmethod
     def get_feature_meta(column, preprocessing_parameters):
         tf_meta = TextBaseFeature.feature_meta(
-            column,
-            preprocessing_parameters['char_most_common'],
-            preprocessing_parameters['word_most_common'],
-            preprocessing_parameters['lowercase']
+            column, preprocessing_parameters
         )
         (
             char_idx2str,
@@ -132,22 +138,30 @@ class TextBaseFeature(BaseFeature):
     @staticmethod
     def feature_data(column, metadata, preprocessing_parameters):
         char_data = build_sequence_matrix(
-            column,
-            metadata['char_str2idx'],
-            preprocessing_parameters['char_format'],
-            metadata['char_max_sequence_length'],
-            preprocessing_parameters['padding_symbol'],
-            preprocessing_parameters['padding'],
-            preprocessing_parameters['lowercase']
+            sequences=column,
+            inverse_vocabulary=metadata['char_str2idx'],
+            tokenizer_type=preprocessing_parameters['char_tokenizer'],
+            length_limit=metadata['char_max_sequence_length'],
+            padding_symbol=preprocessing_parameters['padding_symbol'],
+            padding=preprocessing_parameters['padding'],
+            unknown_symbol=preprocessing_parameters['unknown_symbol'],
+            lowercase=preprocessing_parameters['lowercase'],
+            tokenizer_vocab_file=preprocessing_parameters[
+                'char_vocab_file'
+            ],
         )
         word_data = build_sequence_matrix(
-            column,
-            metadata['word_str2idx'],
-            preprocessing_parameters['word_format'],
-            metadata['word_max_sequence_length'],
-            preprocessing_parameters['padding_symbol'],
-            preprocessing_parameters['padding'],
-            preprocessing_parameters['lowercase']
+            sequences=column,
+            inverse_vocabulary=metadata['word_str2idx'],
+            tokenizer_type=preprocessing_parameters['word_tokenizer'],
+            length_limit=metadata['word_max_sequence_length'],
+            padding_symbol=preprocessing_parameters['padding_symbol'],
+            padding=preprocessing_parameters['padding'],
+            unknown_symbol=preprocessing_parameters['unknown_symbol'],
+            lowercase=preprocessing_parameters['lowercase'],
+            tokenizer_vocab_file=preprocessing_parameters[
+                'word_vocab_file'
+            ],
         )
 
         return char_data, word_data
@@ -183,7 +197,7 @@ class TextInputFeature(TextBaseFeature, SequenceInputFeature):
         self.encoder_obj = self.get_sequence_encoder(encoder_parameters)
 
     def _get_input_placeholder(self):
-        return tf.placeholder(
+        return tf.compat.v1.placeholder(
             tf.int32, shape=[None, None],
             name='{}_placeholder'.format(self.name)
         )
@@ -196,7 +210,7 @@ class TextInputFeature(TextBaseFeature, SequenceInputFeature):
             **kwargs
     ):
         placeholder = self._get_input_placeholder()
-        logging.debug('  targets_placeholder: {0}'.format(placeholder))
+        logger.debug('  targets_placeholder: {0}'.format(placeholder))
 
         return self.build_sequence_input(
             placeholder,
@@ -222,9 +236,14 @@ class TextInputFeature(TextBaseFeature, SequenceInputFeature):
 
     @staticmethod
     def populate_defaults(input_feature):
-        set_default_value(input_feature, 'tied_weights', None)
-        set_default_value(input_feature, 'encoder', 'parallel_cnn')
-        set_default_value(input_feature, 'level', 'word')
+        set_default_values(
+            input_feature,
+            {
+                'tied_weights': None,
+                'encoder': 'parallel_cnn',
+                'level': 'word'
+            }
+        )
 
 
 class TextOutputFeature(TextBaseFeature, SequenceOutputFeature):
@@ -238,7 +257,7 @@ class TextOutputFeature(TextBaseFeature, SequenceOutputFeature):
         self.loss = {
             'type': SOFTMAX_CROSS_ENTROPY,
             'class_weights': 1,
-            'class_distance_temperature': 0,
+            'class_similarities_temperature': 0,
             'weight': 1
         }
         self.num_classes = 0
@@ -248,7 +267,7 @@ class TextOutputFeature(TextBaseFeature, SequenceOutputFeature):
         self.decoder_obj = self.get_sequence_decoder(feature)
 
     def _get_output_placeholder(self):
-        return tf.placeholder(
+        return tf.compat.v1.placeholder(
             tf.int32,
             [None, self.max_sequence_length],
             name='{}_placeholder'.format(self.name)
@@ -259,6 +278,8 @@ class TextOutputFeature(TextBaseFeature, SequenceOutputFeature):
             hidden,
             hidden_size,
             regularizer=None,
+            dropout_rate=None,
+            is_training=None,
             **kwargs
     ):
         train_mean_loss, eval_loss, output_tensors = self.build_sequence_output(
@@ -286,7 +307,7 @@ class TextOutputFeature(TextBaseFeature, SequenceOutputFeature):
             'value': 0,
             'type': MEASURE
         }),
-        (OVERALL_ACCURACY, {
+        (TOKEN_ACCURACY, {
             'output': CORRECT_OVERALL_PREDICTIONS,
             'aggregation': SEQ_SUM,
             'value': 0,
@@ -358,27 +379,31 @@ class TextOutputFeature(TextBaseFeature, SequenceOutputFeature):
                     )
                 )
 
-        if output_feature[LOSS]['class_distance_temperature'] > 0:
-            if 'distances' in feature_metadata:
-                distances = feature_metadata['distances']
-                temperature = output_feature[LOSS]['class_distance_temperature']
+        if output_feature[LOSS]['class_similarities_temperature'] > 0:
+            if 'class_similarities' in output_feature:
+                distances = output_feature['class_similarities']
+                temperature = output_feature[LOSS][
+                    'class_similarities_temperature']
                 for i in range(len(distances)):
                     distances[i, :] = softmax(
                         distances[i, :],
                         temperature=temperature
                     )
-                output_feature[LOSS]['distances'] = distances
+                output_feature[LOSS]['class_similarities'] = distances
             else:
                 raise ValueError(
-                    'No class distance metadata available '
+                    'class_similarities_temperature > 0,'
+                    'but no class similarities are provided '
                     'for feature {}'.format(output_feature['name'])
                 )
 
         if output_feature[LOSS]['type'] == 'sampled_softmax_cross_entropy':
-            output_feature[LOSS]['class_counts'] = [(
-                feature_metadata['str2freq'][cls]
-                for cls in feature_metadata['idx2str']
-            )]
+            level_str2freq = '{}_str2freq'.format(output_feature['level'])
+            level_idx2str = '{}_idx2str'.format(output_feature['level'])
+            output_feature[LOSS]['class_counts'] = [
+                feature_metadata[level_str2freq][cls]
+                for cls in feature_metadata[level_idx2str]
+            ]
 
     @staticmethod
     def calculate_overall_stats(
@@ -408,8 +433,9 @@ class TextOutputFeature(TextBaseFeature, SequenceOutputFeature):
             result,
             metadata,
             experiment_dir_name,
-            skip_save_unprocessed_output=False
+            skip_save_unprocessed_output=False,
     ):
+        # todo: refactor to reuse SeuuqnceOutputFeature.postprocess_results
         postprocessed = {}
         npy_filename = os.path.join(experiment_dir_name, '{}_{}.npy')
         name = output_feature['name']
@@ -419,7 +445,9 @@ class TextOutputFeature(TextBaseFeature, SequenceOutputFeature):
             preds = result[PREDICTIONS]
             if level_idx2str in metadata:
                 postprocessed[PREDICTIONS] = [
-                    [metadata[level_idx2str][token] for token in pred]
+                    [metadata[level_idx2str][token]
+                     if token < len(metadata[level_idx2str]) else UNKNOWN_SYMBOL
+                     for token in pred]
                     for pred in preds
                 ]
             else:
@@ -434,8 +462,10 @@ class TextOutputFeature(TextBaseFeature, SequenceOutputFeature):
             last_preds = result[LAST_PREDICTIONS]
             if level_idx2str in metadata:
                 postprocessed[LAST_PREDICTIONS] = [
-                    metadata[level_idx2str][last_pred] for last_pred in
-                    last_preds
+                    metadata[level_idx2str][last_pred]
+                    if last_pred < len(
+                        metadata[level_idx2str]) else UNKNOWN_SYMBOL
+                    for last_pred in last_preds
                 ]
             else:
                 postprocessed[LAST_PREDICTIONS] = last_preds
@@ -459,12 +489,16 @@ class TextOutputFeature(TextBaseFeature, SequenceOutputFeature):
                     probs = np.amax(probs, axis=-1)
                     prob = np.prod(probs, axis=-1)
 
-                postprocessed[PROBABILITIES] = probs
-                postprocessed['probability'] = prob
+                # commenting probabilities out because usually it is huge:
+                # dataset x length x classes
+                # todo: add a mechanism for letting the user decide to save it
+                # postprocessed[PROBABILITIES] = probs
+                postprocessed[PROBABILITY] = prob
 
                 if not skip_save_unprocessed_output:
-                    np.save(npy_filename.format(name, PROBABILITIES), probs)
-                    np.save(npy_filename.format(name, 'probability'), prob)
+                    # commenting probabilities out, see comment above
+                    # np.save(npy_filename.format(name, PROBABILITIES), probs)
+                    np.save(npy_filename.format(name, PROBABILITY), prob)
 
             del result[PROBABILITIES]
 
@@ -475,21 +509,55 @@ class TextOutputFeature(TextBaseFeature, SequenceOutputFeature):
 
     @staticmethod
     def populate_defaults(output_feature):
-        set_default_value(
-            output_feature,
-            LOSS,
+        set_default_value(output_feature, 'level', 'word')
+
+        # If Loss is not defined, set an empty dictionary
+        set_default_value(output_feature, LOSS, {})
+
+        # Populate the default values for LOSS if they aren't defined already
+        set_default_values(
+            output_feature[LOSS],
             {
-                'weight': 1,
                 'type': 'softmax_cross_entropy',
+                'labels_smoothing': 0,
                 'class_weights': 1,
-                'class_distance_temperature': 0,
+                'robust_lambda': 0,
+                'confidence_penalty': 0,
+                'class_similarities_temperature': 0,
+                'weight': 1
             }
         )
-        set_default_value(output_feature, 'level', 'char')
+
+        if output_feature[LOSS]['type'] == 'sampled_softmax_cross_entropy':
+            set_default_values(
+                output_feature[LOSS],
+                {
+                    'sampler': 'log_uniform',
+                    'negative_samples': 25,
+                    'distortion': 0.75
+                }
+            )
+        else:
+            set_default_values(
+                output_feature[LOSS],
+                {
+                    'sampler': None,
+                    'negative_samples': 0,
+                    'distortion': 1
+                }
+            )
+
+        set_default_value(output_feature[LOSS], 'unique', False)
         set_default_value(output_feature, 'decoder', 'generator')
+
         if output_feature['decoder'] == 'tagger':
             set_default_value(output_feature, 'reduce_input', None)
-        set_default_value(output_feature, 'dependencies', [])
-        set_default_value(output_feature, 'weight', 1)
-        set_default_value(output_feature, 'reduce_input', SUM)
-        set_default_value(output_feature, 'reduce_dependencies', SUM)
+
+        set_default_values(
+            output_feature,
+            {
+                'dependencies': [],
+                'reduce_input': SUM,
+                'reduce_dependencies': SUM
+            }
+        )

@@ -17,32 +17,53 @@
 from __future__ import absolute_import
 from __future__ import division
 
+import copy
+import logging
+import sys
 from collections import Counter
 from sys import platform
 
-import copy
-import logging
-import matplotlib as mpl
-
-if platform == "darwin":  # OS X
-    mpl.use('TkAgg')
-import matplotlib.patches as patches
-import matplotlib.path as path
-import matplotlib.patheffects as PathEffects
-import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
-from matplotlib import ticker
-from matplotlib.lines import Line2D
-from mpl_toolkits.mplot3d import Axes3D
+
+import ludwig.contrib
+from ludwig.constants import TRAINING, VALIDATION
+
+logger = logging.getLogger(__name__)
+
+try:
+    import matplotlib as mpl
+
+    if platform == "darwin":  # OS X
+        mpl.use('TkAgg')
+    import matplotlib.patches as patches
+    import matplotlib.path as path
+    import matplotlib.patheffects as PathEffects
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from matplotlib import ticker
+    from matplotlib.lines import Line2D
+    from mpl_toolkits.mplot3d import Axes3D
+except ImportError:
+    logger.error(
+        ' matplotlib or seaborn are not installed. '
+        'In order to install all visualization dependencies run '
+        'pip install ludwig[viz]'
+    )
+    sys.exit(-1)
 
 
 # plt.rc('xtick', labelsize='x-large')
 # plt.rc('ytick', labelsize='x-large')
 # plt.rc('axes', labelsize='x-large')
 
-def learning_curves_plot(train_values, vali_values, metric, algorithm_names=None,
-                        title=None):
+def learning_curves_plot(
+        train_values,
+        vali_values,
+        metric,
+        algorithm_names=None,
+        title=None,
+        filename=None
+):
     num_algorithms = len(train_values)
     max_len = max([len(tv) for tv in train_values])
 
@@ -70,19 +91,33 @@ def learning_curves_plot(train_values, vali_values, metric, algorithm_names=None
         name_prefix = algorithm_names[
                           i] + ' ' if algorithm_names is not None and i < len(
             algorithm_names) else ''
-        ax.plot(xs, train_values[i], label=name_prefix + 'training',
+        ax.plot(xs[:len(train_values[i])], train_values[i],
+                label=name_prefix + TRAINING,
                 color=colors[i * 2], linewidth=3)
-        if i < len(vali_values):
-            ax.plot(xs, vali_values[i], label=name_prefix + 'validation',
+        if i < len(vali_values) and vali_values[i] is not None and len(
+                vali_values[i]) > 0:
+            ax.plot(xs[:len(vali_values[i])], vali_values[i],
+                    label=name_prefix + VALIDATION,
                     color=colors[i * 2 + 1], linewidth=3)
 
     ax.legend()
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def compare_classifiers_plot(scores, metrics, algoritm_names=None,
-                             adaptive=False, decimals=4, title=None):
+def compare_classifiers_plot(
+        scores,
+        metrics,
+        algoritm_names=None,
+        adaptive=False,
+        decimals=4,
+        title=None,
+        filename=None
+):
     assert len(scores) == len(metrics)
     assert len(scores) > 0
 
@@ -140,11 +175,21 @@ def compare_classifiers_plot(scores, metrics, algoritm_names=None,
 
     ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def compare_classifiers_line_plot(xs, scores, metric, algorithm_names=None,
-                                  title=None):
+def compare_classifiers_line_plot(
+        xs,
+        scores,
+        metric,
+        algorithm_names=None,
+        title=None,
+        filename=None
+):
     sns.set_style('whitegrid')
     colors = plt.get_cmap('tab10').colors
 
@@ -171,11 +216,20 @@ def compare_classifiers_line_plot(xs, scores, metric, algorithm_names=None,
 
     ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def compare_classifiers_multiclass_multimetric_plot(scores, metrics,
-                                                    labels=None, title=None):
+def compare_classifiers_multiclass_multimetric_plot(
+        scores,
+        metrics,
+        labels=None,
+        title=None,
+        filename=None
+):
     assert len(scores) > 0
 
     sns.set_style('whitegrid')
@@ -202,11 +256,21 @@ def compare_classifiers_multiclass_multimetric_plot(scores, metrics,
 
     ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def radar_chart(ground_truth, predictions, algorithms=None, log_scale=False,
-                title=None):
+def radar_chart(
+        ground_truth,
+        predictions,
+        algorithms=None,
+        log_scale=False,
+        title=None,
+        filename=None
+):
     sns.set_style('whitegrid')
 
     if title is not None:
@@ -216,7 +280,7 @@ def radar_chart(ground_truth, predictions, algorithms=None, log_scale=False,
     predictions = [pred[0:10] for pred in predictions]
 
     gt_argsort = np.argsort(-ground_truth)  # sort deacreasing
-    logging.info(gt_argsort)
+    logger.info(gt_argsort)
     ground_truth = ground_truth[gt_argsort]
     predictions = [pred[gt_argsort] for pred in predictions]
 
@@ -279,7 +343,11 @@ def radar_chart(ground_truth, predictions, algorithms=None, log_scale=False,
 
     ax.legend(frameon=True, loc='upper left')
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
 def pie(ax, values, **kwargs):
@@ -295,8 +363,15 @@ def pie(ax, values, **kwargs):
     return wedges
 
 
-def donut(inside_values, inside_labels, outside_values, outside_labels,
-          outside_groups, title=None):
+def donut(
+        inside_values,
+        inside_labels,
+        outside_values,
+        outside_labels,
+        outside_groups,
+        title=None,
+        filename=None
+):
     fig, ax = plt.subplots()
 
     if title is not None:
@@ -358,11 +433,21 @@ def donut(inside_values, inside_labels, outside_values, outside_labels,
 
     ax.legend(wedges, labels, frameon=True)
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def confidence_fitlering_plot(thresholds, accuracies, dataset_kepts,
-                              algorithm_names=None, title=None):
+def confidence_fitlering_plot(
+        thresholds,
+        accuracies,
+        dataset_kepts,
+        algorithm_names=None,
+        title=None,
+        filename=None
+):
     assert len(accuracies) == len(dataset_kepts)
     num_algorithms = len(accuracies)
 
@@ -417,15 +502,23 @@ def confidence_fitlering_plot(thresholds, accuracies, dataset_kepts,
 
     ax1.legend(frameon=True, loc=3)
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def confidence_fitlering_data_vs_acc_plot(accuracies, dataset_kepts,
-                                          model_names=None,
-                                          dotted=False,
-                                          decimal_digits=0,
-                                          y_label='accuracy',
-                                          title=None):
+def confidence_fitlering_data_vs_acc_plot(
+        accuracies,
+        dataset_kepts,
+        model_names=None,
+        dotted=False,
+        decimal_digits=0,
+        y_label='accuracy',
+        title=None,
+        filename=None
+):
     assert len(accuracies) == len(dataset_kepts)
 
     sns.set_style('whitegrid')
@@ -478,12 +571,20 @@ def confidence_fitlering_data_vs_acc_plot(accuracies, dataset_kepts,
 
     ax.legend(frameon=True, loc=3)
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def confidence_fitlering_data_vs_acc_multiline_plot(accuracies, dataset_kepts,
-                                                    models_names,
-                                                    title=None):
+def confidence_fitlering_data_vs_acc_multiline_plot(
+        accuracies,
+        dataset_kepts,
+        models_names,
+        title=None,
+        filename=None
+):
     assert len(accuracies) == len(dataset_kepts)
 
     sns.set_style('whitegrid')
@@ -525,12 +626,22 @@ def confidence_fitlering_data_vs_acc_multiline_plot(accuracies, dataset_kepts,
     legend_elements = [Line2D([0], [0], linewidth=1.0, color=colors[0])]
     ax.legend(legend_elements, models_names)
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def confidence_fitlering_3d_plot(thresholds_1, thresholds_2, accuracies,
-                                 dataset_kepts, threshold_fields=None,
-                                 title=None):
+def confidence_fitlering_3d_plot(
+        thresholds_1,
+        thresholds_2,
+        accuracies,
+        dataset_kepts,
+        threshold_output_feature_names=None,
+        title=None,
+        filename=None
+):
     assert len(accuracies) == len(dataset_kepts)
     assert len(thresholds_1) == len(thresholds_2)
 
@@ -554,8 +665,8 @@ def confidence_fitlering_3d_plot(thresholds_1, thresholds_2, accuracies,
     ax.grid(which='minor', alpha=0.5)
     ax.grid(which='major', alpha=0.75)
 
-    ax.set_xlabel('{} probability'.format(threshold_fields[0]))
-    ax.set_ylabel('{} probability'.format(threshold_fields[1]))
+    ax.set_xlabel('{} probability'.format(threshold_output_feature_names[0]))
+    ax.set_ylabel('{} probability'.format(threshold_output_feature_names[1]))
 
     ax.set_xlim(np.min(thresholds_1), np.max(thresholds_1))
     ax.set_ylim(np.min(thresholds_2), np.max(thresholds_2))
@@ -604,11 +715,20 @@ def confidence_fitlering_3d_plot(thresholds_1, thresholds_2, accuracies,
     ax.legend(frameon=True, loc=3, handles=[handle_1, handle_2])
 
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def threshold_vs_metric_plot(thresholds, scores, algorithm_names=None,
-                             title=None):
+def threshold_vs_metric_plot(
+        thresholds,
+        scores,
+        algorithm_names=None,
+        title=None,
+        filename=None
+):
     sns.set_style('whitegrid')
 
     colors = plt.get_cmap('tab10').colors
@@ -645,10 +765,20 @@ def threshold_vs_metric_plot(thresholds, scores, algorithm_names=None,
 
     ax1.legend(frameon=True)
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def roc_curves(fpr_tprs, algorithm_names=None, title=None, graded_color=False):
+def roc_curves(
+        fpr_tprs,
+        algorithm_names=None,
+        title=None,
+        graded_color=False,
+        filename=None
+):
     sns.set_style('whitegrid')
 
     colors = plt.get_cmap('tab10').colors
@@ -687,11 +817,19 @@ def roc_curves(fpr_tprs, algorithm_names=None, title=None, graded_color=False):
 
     ax.legend(frameon=True)
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def calibration_plot(fraction_positives, mean_predicted_values,
-                     algorithm_names=None):
+def calibration_plot(
+        fraction_positives,
+        mean_predicted_values,
+        algorithm_names=None,
+        filename=None
+):
     assert len(fraction_positives) == len(mean_predicted_values)
 
     sns.set_style('whitegrid')
@@ -713,12 +851,16 @@ def calibration_plot(fraction_positives, mean_predicted_values,
 
         # sns.tsplot(mean_predicted_values[i], fraction_positives[i], ax=ax1, color=colors[i])
 
+        assert len(mean_predicted_values[i]) == len(fraction_positives[i])
+        order = min(3, len(mean_predicted_values[i]) - 1)
+
         sns.regplot(mean_predicted_values[i], fraction_positives[i],
-                    order=3, x_estimator=np.mean, color=colors[i], marker='o',
-                    scatter_kws={'s': 40},
+                    order=order, x_estimator=np.mean, color=colors[i],
+                    marker='o', scatter_kws={'s': 40},
                     label=algorithm_names[
                         i] if algorithm_names is not None and i < len(
                         algorithm_names) else '')
+
 
     ticks = np.linspace(0.0, 1.0, num=11)
     plt.xlim([-0.05, 1.05])
@@ -731,10 +873,19 @@ def calibration_plot(fraction_positives, mean_predicted_values,
     plt.title('Calibration (reliability curve)')
 
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def brier_plot(brier_scores, algorithm_names=None, title=None):
+def brier_plot(
+        brier_scores,
+        algorithm_names=None,
+        title=None,
+        filename=None
+):
     sns.set_style('whitegrid')
 
     if title is not None:
@@ -758,10 +909,18 @@ def brier_plot(brier_scores, algorithm_names=None, title=None):
 
     plt.legend()
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def predictions_distribution_plot(probabilities, algorithm_names=None):
+def predictions_distribution_plot(
+        probabilities,
+        algorithm_names=None,
+        filename=None
+):
     sns.set_style('whitegrid')
 
     colors = plt.get_cmap('tab10').colors
@@ -787,10 +946,19 @@ def predictions_distribution_plot(probabilities, algorithm_names=None):
     plt.legend(loc='upper center', ncol=2)
 
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def confusion_matrix_plot(confusion_matrix, labels=None, field=None):
+def confusion_matrix_plot(
+        confusion_matrix,
+        labels=None,
+        output_feature_name=None,
+        filename=None
+):
     mpl.rcParams.update({'figure.autolayout': True})
     fig, ax = plt.subplots()
 
@@ -807,15 +975,26 @@ def confusion_matrix_plot(confusion_matrix, labels=None, field=None):
     ax.grid(False)
     ax.tick_params(axis='both', which='both', length=0)
     fig.colorbar(cax, ax=ax, extend='max')
-    ax.set_xlabel('Predicted {}'.format(field))
-    ax.set_ylabel('Actual {}'.format(field))
+    ax.set_xlabel('Predicted {}'.format(output_feature_name))
+    ax.set_ylabel('Actual {}'.format(output_feature_name))
 
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def double_axis_line_plot(y1_sorted, y2, y1_name, y2_name, labels=None,
-                          title=None):
+def double_axis_line_plot(
+        y1_sorted,
+        y2,
+        y1_name,
+        y2_name,
+        labels=None,
+        title=None,
+        filename=None
+):
     sns.set_style('whitegrid')
 
     colors = plt.get_cmap('tab10').colors
@@ -850,15 +1029,32 @@ def double_axis_line_plot(y1_sorted, y2, y1_name, y2_name, labels=None,
              linewidth=4.0)
 
     fig.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def plot_matrix(matrix, cmap='hot'):
+def plot_matrix(
+        matrix,
+        cmap='hot',
+        filename=None
+):
     plt.matshow(matrix, cmap=cmap)
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def plot_distributions(distributions, labels=None, title=None):
+def plot_distributions(
+        distributions,
+        labels=None,
+        title=None,
+        filename=None
+):
     sns.set_style('whitegrid')
 
     colors = plt.get_cmap('tab10').colors
@@ -884,10 +1080,19 @@ def plot_distributions(distributions, labels=None, title=None):
 
     ax1.legend(frameon=True)
     fig.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def plot_distributions_difference(distribution, labels=None, title=None):
+def plot_distributions_difference(
+        distribution,
+        labels=None,
+        title=None,
+        filename=None
+):
     sns.set_style('whitegrid')
 
     colors = plt.get_cmap('tab10').colors
@@ -909,10 +1114,21 @@ def plot_distributions_difference(distribution, labels=None, title=None):
     ax1.plot(distribution, color=colors[0])
 
     fig.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()
 
 
-def bar_plot(xs, ys, decimals=4, labels=None, title=None):
+def bar_plot(
+        xs,
+        ys,
+        decimals=4,
+        labels=None,
+        title=None,
+        filename=None
+):
     assert len(xs) == len(ys)
     assert len(xs) > 0
 
@@ -956,4 +1172,8 @@ def bar_plot(xs, ys, decimals=4, labels=None, title=None):
             [PathEffects.withStroke(linewidth=3, foreground='black')])
 
     plt.tight_layout()
-    plt.show()
+    ludwig.contrib.contrib_command("visualize_figure", plt.gcf())
+    if filename:
+        plt.savefig(filename)
+    else:
+        plt.show()

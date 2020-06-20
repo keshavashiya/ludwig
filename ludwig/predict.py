@@ -25,6 +25,8 @@ import sys
 from collections import OrderedDict
 from pprint import pformat
 
+from ludwig.constants import TEST, TRAINING, VALIDATION, FULL
+from ludwig.contrib import contrib_command
 from ludwig.data.postprocessing import postprocess
 from ludwig.data.preprocessing import preprocess_for_prediction
 from ludwig.features.feature_registries import output_type_registry
@@ -33,42 +35,37 @@ from ludwig.globals import TRAIN_SET_METADATA_FILE_NAME
 from ludwig.models.model import load_model_and_definition
 from ludwig.utils.data_utils import save_csv
 from ludwig.utils.data_utils import save_json
-from ludwig.utils.misc import get_from_registry
+from ludwig.utils.misc import get_from_registry, \
+    find_non_existing_dir_by_adding_suffix
 from ludwig.utils.print_utils import logging_level_registry, repr_ordered_dict
 from ludwig.utils.print_utils import print_boxed
 from ludwig.utils.print_utils import print_ludwig
+
+logger = logging.getLogger(__name__)
 
 
 def full_predict(
         model_path,
         data_csv=None,
         data_hdf5=None,
-        dataset_type='generic',
-        split='test',
+        split=TEST,
         batch_size=128,
         skip_save_unprocessed_output=False,
+        skip_save_test_predictions=False,
+        skip_save_test_statistics=False,
         output_directory='results',
-        only_predictions=False,
+        evaluate_performance=True,
         gpus=None,
         gpu_fraction=1.0,
         use_horovod=False,
         debug=False,
         **kwargs
 ):
-    # setup directories and file names
-    experiment_dir_name = output_directory
-    suffix = 0
-    while os.path.exists(experiment_dir_name):
-        experiment_dir_name = output_directory + '_' + str(suffix)
-        suffix += 1
-
     if is_on_master():
-        logging.info('Dataset type: {}'.format(dataset_type))
-        logging.info('Dataset path: {}'.format(
+        logger.info('Dataset path: {}'.format(
             data_csv if data_csv is not None else data_hdf5))
-        logging.info('Model path: {}'.format(model_path))
-        logging.info('Output path: {}'.format(experiment_dir_name))
-        logging.info('')
+        logger.info('Model path: {}'.format(model_path))
+        logger.info('')
 
     train_set_metadata_json_fp = os.path.join(
         model_path,
@@ -79,11 +76,10 @@ def full_predict(
     dataset, train_set_metadata = preprocess_for_prediction(
         model_path,
         split,
-        dataset_type,
         data_csv,
         data_hdf5,
         train_set_metadata_json_fp,
-        only_predictions
+        evaluate_performance
     )
 
     # run the prediction
@@ -98,7 +94,7 @@ def full_predict(
         model,
         model_definition,
         batch_size,
-        only_predictions,
+        evaluate_performance,
         gpus,
         gpu_fraction,
         debug
@@ -106,7 +102,18 @@ def full_predict(
     model.close_session()
 
     if is_on_master():
-        os.mkdir(experiment_dir_name)
+        # setup directories and file names
+        experiment_dir_name = find_non_existing_dir_by_adding_suffix(output_directory)
+
+        # if we are skipping all saving,
+        # there is no need to create a directory that will remain empty
+        should_create_exp_dir = not (
+                skip_save_unprocessed_output and
+                skip_save_test_predictions and
+                skip_save_test_statistics
+        )
+        if should_create_exp_dir:
+                os.makedirs(experiment_dir_name)
 
         # postprocess
         postprocessed_output = postprocess(
@@ -117,13 +124,15 @@ def full_predict(
             skip_save_unprocessed_output or not is_on_master()
         )
 
-        save_prediction_outputs(postprocessed_output, experiment_dir_name)
+        if not skip_save_test_predictions:
+            save_prediction_outputs(postprocessed_output, experiment_dir_name)
 
-        if not only_predictions:
-            print_prediction_results(prediction_results)
-            save_prediction_statistics(prediction_results, experiment_dir_name)
+        if evaluate_performance:
+            print_test_results(prediction_results)
+            if not skip_save_test_statistics:
+                save_test_statistics(prediction_results, experiment_dir_name)
 
-        logging.info('Saved to: {0}'.format(experiment_dir_name))
+        logger.info('Saved to: {0}'.format(experiment_dir_name))
 
 
 def predict(
@@ -132,13 +141,13 @@ def predict(
         model,
         model_definition,
         batch_size=128,
-        only_predictions=False,
+        evaluate_performance=True,
         gpus=None,
         gpu_fraction=1.0,
         debug=False
 ):
     """Computes predictions based on the computed model.
-        :param dataset: Dataset contaning the data to calculate
+        :param dataset: Dataset containing the data to calculate
                the predictions from.
         :type dataset: Dataset
         :param model: The trained model used to produce the predictions.
@@ -148,32 +157,32 @@ def predict(
         :type model_definition: Dictionary
         :param batch_size: The size of batches when computing the predictions.
         :type batch_size: Integer
-        :param only_predictions: If this parameter is True, only the predictions
-               will be returned, if it is False, also performance metrics
+        :param evaluate_performance: If this parameter is False, only the predictions
+               will be returned, if it is True, also performance metrics
                will be calculated on the predictions. It requires the data
-               to contanin also ground truth for the output features, otherwise
+               to contain also ground truth for the output features, otherwise
                the metrics cannot be computed.
-        :type only_predictions: Bool
+        :type evaluate_performance: Bool
         :type gpus: List
         :type gpu_fraction: Integer
         :param debug: If true turns on tfdbg with inf_or_nan checks.
         :type debug: Boolean
 
-        :returns: A dictionary contaning the predictions of each output feature,
+        :returns: A dictionary containing the predictions of each output feature,
                   alongside with statistics on the quality of those predictions
-                  (if only_predictions is False).
+                  (if evaluate_performance is True).
         """
     if is_on_master():
         print_boxed('PREDICT')
     test_stats = model.predict(
         dataset,
         batch_size,
-        only_predictions=only_predictions,
+        evaluate_performance=evaluate_performance,
         gpus=gpus,
         gpu_fraction=gpu_fraction
     )
 
-    if not only_predictions:
+    if evaluate_performance:
         calculate_overall_stats(
             test_stats,
             model_definition['output_features'],
@@ -207,22 +216,25 @@ def save_prediction_outputs(
     for output_field, outputs in postprocessed_output.items():
         for output_type, values in outputs.items():
             if output_type not in skip_output_types:
-                save_csv(csv_filename.format(output_field, output_type), values)
+                save_csv(
+                    csv_filename.format(output_field, output_type),
+                    values
+                )
 
 
-def save_prediction_statistics(prediction_stats, experiment_dir_name):
+def save_test_statistics(test_stats, experiment_dir_name):
     test_stats_fn = os.path.join(
         experiment_dir_name,
-        'prediction_statistics.json'
+        'test_statistics.json'
     )
-    save_json(test_stats_fn, prediction_stats)
+    save_json(test_stats_fn, test_stats)
 
 
-def print_prediction_results(prediction_stats):
-    for output_field, result in prediction_stats.items():
+def print_test_results(test_stats):
+    for output_field, result in test_stats.items():
         if (output_field != 'combined' or
-                (output_field == 'combined' and len(prediction_stats) > 2)):
-            logging.info('\n===== {} ====='.format(output_field))
+                (output_field == 'combined' and len(test_stats) > 2)):
+            logger.info('\n===== {} ====='.format(output_field))
             for measure in sorted(list(result)):
                 if measure != 'confusion_matrix' and measure != 'roc_curve':
                     value = result[measure]
@@ -230,7 +242,7 @@ def print_prediction_results(prediction_stats):
                         value_repr = repr_ordered_dict(value)
                     else:
                         value_repr = pformat(result[measure], indent=2)
-                    logging.info(
+                    logger.info(
                         '{0}: {1}'.format(
                             measure,
                             value_repr
@@ -241,7 +253,7 @@ def print_prediction_results(prediction_stats):
 def cli(sys_argv):
     parser = argparse.ArgumentParser(
         description='This script loads a pretrained model '
-                    'and uses it to predict.',
+                    'and uses it to predict',
         prog='ludwig predict',
         usage='%(prog)s [options]'
     )
@@ -274,8 +286,8 @@ def cli(sys_argv):
     parser.add_argument(
         '-s',
         '--split',
-        default='test',
-        choices=['training', 'validation', 'test', 'full'],
+        default=TEST,
+        choices=[TRAINING, VALIDATION, TEST, FULL],
         help='the split to test the model on'
     )
 
@@ -305,6 +317,19 @@ def cli(sys_argv):
         help='skips saving intermediate NPY output files',
         action='store_true', default=False
     )
+    parser.add_argument(
+        '-sstp',
+        '--skip_save_test_predictions',
+        help='skips saving test predictions CSV files',
+        action='store_true', default=False
+    )
+    parser.add_argument(
+        '-sstes',
+        '--skip_save_test_statistics',
+        help='skips saving test statistics JSON file',
+        action='store_true', default=False
+    )
+
 
     # ------------------
     # Generic parameters
@@ -315,13 +340,6 @@ def cli(sys_argv):
         type=int,
         default=128,
         help='size of batches'
-    )
-    parser.add_argument(
-        '-op',
-        '--only_predictions',
-        action='store_true',
-        default=False,
-        help='skip metrics calculation'
     )
 
     # ------------------
@@ -364,12 +382,13 @@ def cli(sys_argv):
     )
 
     args = parser.parse_args(sys_argv)
+    args.evaluate_performance = False
 
-    logging.basicConfig(
-        stream=sys.stdout,
-        level=logging_level_registry[args.logging_level],
-        format='%(message)s'
+    logging.getLogger('ludwig').setLevel(
+        logging_level_registry[args.logging_level]
     )
+    global logger
+    logger = logging.getLogger('ludwig.predict')
 
     set_on_master(args.use_horovod)
 
@@ -380,4 +399,5 @@ def cli(sys_argv):
 
 
 if __name__ == '__main__':
+    contrib_command("predict", *sys.argv)
     cli(sys.argv[1:])

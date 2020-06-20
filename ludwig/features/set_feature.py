@@ -29,27 +29,29 @@ from ludwig.features.feature_utils import set_str_to_idx
 from ludwig.models.modules.embedding_modules import EmbedSparse
 from ludwig.models.modules.initializer_modules import get_initializer
 from ludwig.utils.misc import set_default_value
-from ludwig.utils.strings_utils import create_vocabulary
+from ludwig.utils.strings_utils import create_vocabulary, UNKNOWN_SYMBOL
+
+logger = logging.getLogger(__name__)
 
 
 class SetBaseFeature(BaseFeature):
     def __init__(self, feature):
         super().__init__(feature)
-        self.type = IMAGE
+        self.type = SET
 
     preprocessing_defaults = {
-        'format': 'space',
+        'tokenizer': 'space',
         'most_common': 10000,
         'lowercase': False,
         'missing_value_strategy': FILL_WITH_CONST,
-        'fill_value': ''
+        'fill_value': UNKNOWN_SYMBOL
     }
 
     @staticmethod
     def get_feature_meta(column, preprocessing_parameters):
         idx2str, str2idx, str2freq, max_size = create_vocabulary(
             column,
-            preprocessing_parameters['format'],
+            preprocessing_parameters['tokenizer'],
             num_most_frequent=preprocessing_parameters['most_common'],
             lowercase=preprocessing_parameters['lowercase']
         )
@@ -68,7 +70,7 @@ class SetBaseFeature(BaseFeature):
                 lambda x: set_str_to_idx(
                     x,
                     metadata['str2idx'],
-                    preprocessing_parameters['format']
+                    preprocessing_parameters['tokenizer']
                 )
             )
         )
@@ -129,8 +131,8 @@ class SetInputFeature(SetBaseFeature, InputFeature):
 
     def _get_input_placeholder(self):
         # None is for dealing with variable batch size
-        return tf.placeholder(
-            tf.int32,
+        return tf.compat.v1.placeholder(
+            tf.bool,
             shape=[None, len(self.vocab)],
             name=self.name
         )
@@ -143,7 +145,7 @@ class SetInputFeature(SetBaseFeature, InputFeature):
             **kwargs
     ):
         placeholder = self._get_input_placeholder()
-        logging.debug('  placeholder: {0}'.format(placeholder))
+        logger.debug('  placeholder: {0}'.format(placeholder))
 
         embedded, embedding_size = self.embed_sparse(
             placeholder,
@@ -151,7 +153,7 @@ class SetInputFeature(SetBaseFeature, InputFeature):
             dropout_rate,
             is_training=is_training
         )
-        logging.debug('  feature_representation: {0}'.format(embedded))
+        logger.debug('  feature_representation: {0}'.format(embedded))
 
         feature_representation = {
             'name': self.name,
@@ -191,7 +193,7 @@ class SetOutputFeature(SetBaseFeature, OutputFeature):
         _ = self.overwrite_defaults(feature)
 
     def _get_output_placeholder(self):
-        return tf.placeholder(
+        return tf.compat.v1.placeholder(
             tf.bool,
             shape=[None, self.num_classes],
             name='{}_placeholder'.format(self.name)
@@ -206,23 +208,23 @@ class SetOutputFeature(SetBaseFeature, OutputFeature):
         if not self.regularize:
             regularizer = None
 
-        with tf.variable_scope('predictions_{}'.format(self.name)):
+        with tf.compat.v1.variable_scope('predictions_{}'.format(self.name)):
             initializer_obj = get_initializer(self.initializer)
-            weights = tf.get_variable(
+            weights = tf.compat.v1.get_variable(
                 'weights',
                 initializer=initializer_obj([hidden_size, self.num_classes]),
                 regularizer=regularizer
             )
-            logging.debug('  class_weights: {0}'.format(weights))
+            logger.debug('  class_weights: {0}'.format(weights))
 
-            biases = tf.get_variable(
+            biases = tf.compat.v1.get_variable(
                 'biases',
                 [self.num_classes]
             )
-            logging.debug('  class_biases: {0}'.format(biases))
+            logger.debug('  class_biases: {0}'.format(biases))
 
             logits = tf.matmul(hidden, weights) + biases
-            logging.debug('  logits: {0}'.format(logits))
+            logger.debug('  logits: {0}'.format(logits))
 
             probabilities = tf.nn.sigmoid(
                 logits,
@@ -242,9 +244,9 @@ class SetOutputFeature(SetBaseFeature, OutputFeature):
             targets,
             logits
     ):
-        with tf.variable_scope('loss_{}'.format(self.name)):
+        with tf.compat.v1.variable_scope('loss_{}'.format(self.name)):
             train_loss = tf.nn.sigmoid_cross_entropy_with_logits(
-                labels=tf.to_float(targets),
+                labels=tf.cast(targets, tf.float32),
                 logits=logits
             )
             train_loss = tf.reduce_sum(train_loss, axis=1)
@@ -258,22 +260,25 @@ class SetOutputFeature(SetBaseFeature, OutputFeature):
 
     def _get_measures(self, targets, predictions):
         intersection = tf.reduce_sum(
-            tf.to_float(tf.logical_and(targets, predictions)),
+            tf.cast(tf.logical_and(targets, predictions), tf.float32),
             axis=1
         )
         union = tf.reduce_sum(
-            tf.to_float(tf.logical_or(targets, predictions)),
+            tf.cast(tf.logical_or(targets, predictions), tf.float32),
             axis=1
         )
         jaccard_index = intersection / union
+        mean_jaccard_index = tf.reduce_mean(jaccard_index)
 
-        return jaccard_index
+        return jaccard_index, mean_jaccard_index
 
     def build_output(
             self,
             hidden,
             hidden_size,
             regularizer=None,
+            dropout_rate=None,
+            is_training=None,
             **kwargs
     ):
         output_tensors = {}
@@ -281,7 +286,7 @@ class SetOutputFeature(SetBaseFeature, OutputFeature):
         # ================ Placeholder ================
         targets = self._get_output_placeholder()
         output_tensors[self.name] = targets
-        logging.debug('  targets_placeholder: {0}'.format(targets))
+        logger.debug('  targets_placeholder: {0}'.format(targets))
 
         # ================ Predictions ================
         ppl = self._get_predictions(
@@ -291,20 +296,26 @@ class SetOutputFeature(SetBaseFeature, OutputFeature):
         )
         predictions, probabilities, logits = ppl
 
-        jaccard_index = self._get_measures(targets, predictions)
+        # ================ Measures ================
+        jaccard_index, mean_jaccard = self._get_measures(targets, predictions)
 
         output_tensors[PREDICTIONS + '_' + self.name] = predictions
         output_tensors[PROBABILITIES + '_' + self.name] = probabilities
         output_tensors[JACCARD + '_' + self.name] = jaccard_index
 
-        # ================ Loss (Binary Cross Entropy) ================
+        tf.compat.v1.summary.scalar(
+            'batch_train_mean_jaccard_{}'.format(self.name),
+            mean_jaccard
+        )
+
+        # ================ Loss ================
         train_mean_loss, eval_loss = self._get_loss(targets, logits)
 
         output_tensors[EVAL_LOSS + '_' + self.name] = eval_loss
         output_tensors[TRAIN_MEAN_LOSS + '_' + self.name] = train_mean_loss
 
-        tf.summary.scalar(
-            'train_mean_loss_{}'.format(self.name),
+        tf.compat.v1.summary.scalar(
+            'batch_train_mean_loss_{}'.format(self.name),
             train_mean_loss
         )
 
@@ -364,7 +375,7 @@ class SetOutputFeature(SetBaseFeature, OutputFeature):
             result,
             metadata,
             experiment_dir_name,
-            skip_save_unprocessed_output=False
+            skip_save_unprocessed_output=False,
     ):
         postprocessed = {}
         npy_filename = os.path.join(experiment_dir_name, '{}_{}.npy')
@@ -390,11 +401,11 @@ class SetOutputFeature(SetBaseFeature, OutputFeature):
             prob = [[prob for prob in prob_set if
                      prob >= output_feature['threshold']] for prob_set in probs]
             postprocessed[PROBABILITIES] = probs
-            postprocessed['probability'] = prob
+            postprocessed[PROBABILITY] = prob
 
             if not skip_save_unprocessed_output:
                 np.save(npy_filename.format(name, PROBABILITIES), probs)
-                np.save(npy_filename.format(name, 'probability'), probs)
+                np.save(npy_filename.format(name, PROBABILITY), probs)
 
             del result[PROBABILITIES]
 

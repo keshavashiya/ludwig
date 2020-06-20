@@ -36,8 +36,11 @@ from ludwig.utils.math_utils import int_type
 from ludwig.utils.math_utils import softmax
 from ludwig.utils.metrics_utils import ConfusionMatrix
 from ludwig.utils.misc import set_default_value
+from ludwig.utils.misc import set_default_values
 from ludwig.utils.strings_utils import UNKNOWN_SYMBOL
 from ludwig.utils.strings_utils import create_vocabulary
+
+logger = logging.getLogger(__name__)
 
 
 class CategoryBaseFeature(BaseFeature):
@@ -72,7 +75,8 @@ class CategoryBaseFeature(BaseFeature):
         return np.array(
             column.map(
                 lambda x: (
-                    metadata['str2idx'][x] if x in metadata['str2idx']
+                    metadata['str2idx'][x.strip()]
+                    if x.strip() in metadata['str2idx']
                     else metadata['str2idx'][UNKNOWN_SYMBOL]
                 )
             ),
@@ -132,7 +136,7 @@ class CategoryInputFeature(CategoryBaseFeature, InputFeature):
         input_feature['vocab'] = feature_metadata['idx2str']
 
     def _get_input_placeholder(self):
-        return tf.placeholder(
+        return tf.compat.v1.placeholder(
             tf.int32,
             shape=[None],  # None is for dealing with variable batch size
             name='{}_placeholder'.format(self.name)
@@ -146,7 +150,7 @@ class CategoryInputFeature(CategoryBaseFeature, InputFeature):
             **kwargs
     ):
         placeholder = self._get_input_placeholder()
-        logging.debug('  placeholder: {0}'.format(placeholder))
+        logger.debug('  placeholder: {0}'.format(placeholder))
 
         # ================ Embeddings ================
         embedded, embedding_size = self.embed(
@@ -155,7 +159,7 @@ class CategoryInputFeature(CategoryBaseFeature, InputFeature):
             dropout_rate,
             is_training=is_training
         )
-        logging.debug('  feature_representation: {0}'.format(
+        logger.debug('  feature_representation: {0}'.format(
             embedded))
 
         feature_representation = {
@@ -220,7 +224,7 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
     ])
 
     def _get_output_placeholder(self):
-        return tf.placeholder(
+        return tf.compat.v1.placeholder(
             tf.int64,
             [None],  # None is for dealing with variable batch size
             name='{}_placeholder'.format(self.name)
@@ -235,23 +239,23 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
         if not self.regularize:
             regularizer = None
 
-        with tf.variable_scope('predictions_{}'.format(self.name)):
+        with tf.compat.v1.variable_scope('predictions_{}'.format(self.name)):
             initializer_obj = get_initializer(self.initializer)
-            weights = tf.get_variable(
+            weights = tf.compat.v1.get_variable(
                 'weights',
                 initializer=initializer_obj([hidden_size, self.num_classes]),
                 regularizer=regularizer
             )
-            logging.debug('  class_weights: {0}'.format(weights))
+            logger.debug('  class_weights: {0}'.format(weights))
 
-            biases = tf.get_variable(
+            biases = tf.compat.v1.get_variable(
                 'biases',
                 [self.num_classes]
             )
-            logging.debug('  class_biases: {0}'.format(biases))
+            logger.debug('  class_biases: {0}'.format(biases))
 
             logits = tf.matmul(hidden, weights) + biases
-            logging.debug('  logits: {0}'.format(logits))
+            logger.debug('  logits: {0}'.format(logits))
 
             probabilities = tf.nn.softmax(
                 logits,
@@ -289,44 +293,45 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
             class_weights,
             class_biases
     ):
-        with tf.variable_scope('loss_{}'.format(self.name)):
-            if ('distances' in self.loss and
-                    self.loss['distances'] is not None):
+        with tf.compat.v1.variable_scope('loss_{}'.format(self.name)):
+            if ('class_similarities' in self.loss and
+                    self.loss['class_similarities'] is not None):
 
-                class_distances = self.loss['distances']
+                class_similarities = self.loss['class_similarities']
 
-                if (class_distances.shape[0] != self.num_classes or
-                        class_distances.shape[1] != self.num_classes):
-                    logging.info(
-                        'Class distances is {} while num classes is {}'.format(
-                            class_distances.shape,
+                if (class_similarities.shape[0] != self.num_classes or
+                        class_similarities.shape[1] != self.num_classes):
+                    logger.info(
+                        'Class similarities is {} while num classes is {}'.format(
+                            class_similarities.shape,
                             self.num_classes
                         )
                     )
-                    if (class_distances.shape[0] > self.num_classes and
-                            class_distances.shape[1] > self.num_classes):
+                    if (class_similarities.shape[0] > self.num_classes and
+                            class_similarities.shape[1] > self.num_classes):
                         # keep only the first num_classes rows and columns
-                        class_distances = class_distances[
-                                          :self.num_classes,
-                                          :self.num_classes
-                                          ]
-                    elif (class_distances.shape[0] < self.num_classes and
-                          class_distances.shape[1] < self.num_classes):
+                        class_similarities = class_similarities[
+                                             :self.num_classes,
+                                             :self.num_classes
+                                             ]
+                    elif (class_similarities.shape[0] < self.num_classes and
+                          class_similarities.shape[1] < self.num_classes):
                         # fill the missing parts of the matrix with 0s and 1
                         # on the diagonal
                         diag = np.diag((self.num_classes, self.num_classes))
                         diag[
-                        :class_distances.shape[0],
-                        :class_distances.shape[1]
-                        ] = class_distances
-                        class_distances = diag
+                        :class_similarities.shape[0],
+                        :class_similarities.shape[1]
+                        ] = class_similarities
+                        class_similarities = diag
 
-                class_distances = tf.constant(
-                    class_distances,
-                    name='class_distances_{}'.format(self.name)
+                class_similarities = tf.constant(
+                    class_similarities,
+                    dtype=tf.float32,
+                    name='class_similarities_{}'.format(self.name)
                 )
                 vector_labels = tf.gather(
-                    class_distances,
+                    class_similarities,
                     targets,
                     name='vector_labels_{}'.format(self.name)
                 )
@@ -337,7 +342,7 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
                     name='vector_labels_{}'.format(self.name)
                 )
 
-            if self.loss['type'] == 'sampled_softmax_cross_entropy':
+            if self.loss['type'] == SAMPLED_SOFTMAX_CROSS_ENTROPY:
                 train_loss, eval_loss = sampled_softmax_cross_entropy(
                     targets,
                     hidden,
@@ -348,7 +353,7 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
                     self.loss,
                     self.num_classes
                 )
-            elif self.loss['type'] == 'softmax_cross_entropy':
+            elif self.loss['type'] == SOFTMAX_CROSS_ENTROPY:
                 train_loss = weighted_softmax_cross_entropy(
                     logits,
                     vector_labels,
@@ -383,7 +388,7 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
         return train_mean_loss, eval_loss
 
     def _get_measures(self, targets, predictions, logits):
-        with tf.variable_scope('measures_{}'.format(self.name)):
+        with tf.compat.v1.variable_scope('measures_{}'.format(self.name)):
             accuracy_val, correct_predictions = get_accuracy(
                 targets,
                 predictions,
@@ -403,6 +408,8 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
             hidden,
             hidden_size,
             regularizer=None,
+            dropout_rate=None,
+            is_training=None,
             **kwargs
     ):
         output_tensors = {}
@@ -410,7 +417,7 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
         # ================ Placeholder ================
         targets = self._get_output_placeholder()
         output_tensors[self.name] = targets
-        logging.debug('  targets_placeholder: {0}'.format(targets))
+        logger.debug('  targets_placeholder: {0}'.format(targets))
 
         # ================ Predictions ================
         outs = self._get_predictions(
@@ -443,16 +450,16 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
         output_tensors[MEAN_HITS_AT_K + '_' + self.name] = mean_hits_at_k
 
         if 'sampled' not in self.loss['type']:
-            tf.summary.scalar(
-                'train_batch_accuracy_{}'.format(self.name),
+            tf.compat.v1.summary.scalar(
+                'batch_train_mean_accuracy_{}'.format(self.name),
                 accuracy
             )
-            tf.summary.scalar(
-                'train_batch_mean_hits_at_k_{}'.format(self.name),
+            tf.compat.v1.summary.scalar(
+                'batch_train_mean_hits_at_k_{}'.format(self.name),
                 mean_hits_at_k
             )
 
-        # ================ Loss (Cross Entropy) ================
+        # ================ Loss ================
         train_mean_loss, eval_loss = self._get_loss(
             targets,
             hidden,
@@ -465,8 +472,8 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
         output_tensors[EVAL_LOSS + '_' + self.name] = eval_loss
         output_tensors[TRAIN_MEAN_LOSS + '_' + self.name] = train_mean_loss
 
-        tf.summary.scalar(
-            'train_mean_loss_{}'.format(self.name),
+        tf.compat.v1.summary.scalar(
+            'batch_train_mean_loss_{}'.format(self.name),
             train_mean_loss
         )
 
@@ -486,35 +493,111 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
         )
 
         if isinstance(output_feature[LOSS]['class_weights'], (list, tuple)):
-            output_feature[LOSS]['class_weights'] = (
-                    [0] + output_feature[LOSS]['class_weights']  # for UNK
-            )
             if (len(output_feature[LOSS]['class_weights']) !=
                     output_feature['num_classes']):
                 raise ValueError(
                     'The length of class_weights ({}) is not compatible with '
-                    'the number of classes ({})'.format(
+                    'the number of classes ({}) for feature {}. '
+                    'Check the metadata JSON file to see the classes '
+                    'and their order and consider there needs to be a weight '
+                    'for the <UNK> class too.'.format(
                         len(output_feature[LOSS]['class_weights']),
-                        output_feature['num_classes']
+                        output_feature['num_classes'],
+                        output_feature['name']
                     )
                 )
 
-        if output_feature[LOSS]['class_distance_temperature'] > 0:
-            if 'distances' in feature_metadata:
-                distances = feature_metadata['distances']
-                temperature = output_feature[LOSS]['class_distance_temperature']
+        if isinstance(output_feature[LOSS]['class_weights'], dict):
+            if (
+                    feature_metadata['str2idx'].keys() !=
+                    output_feature[LOSS]['class_weights'].keys()
+            ):
+                raise ValueError(
+                    'The class_weights keys ({}) are not compatible with '
+                    'the classes ({}) of feature {}. '
+                    'Check the metadata JSON file to see the classes '
+                    'and consider there needs to be a weight '
+                    'for the <UNK> class too.'.format(
+                        output_feature[LOSS]['class_weights'].keys(),
+                        feature_metadata['str2idx'].keys(),
+                        output_feature['name']
+                    )
+                )
+            else:
+                class_weights = output_feature[LOSS]['class_weights']
+                idx2str = feature_metadata['idx2str']
+                class_weights_list = [class_weights[s] for s in idx2str]
+                output_feature[LOSS]['class_weights'] = class_weights_list
 
-                for i in range(len(distances)):
-                    distances[i, :] = softmax(
-                        distances[i, :],
+        if output_feature[LOSS]['class_similarities_temperature'] > 0:
+            if 'class_similarities' in output_feature[LOSS]:
+                similarities = output_feature[LOSS]['class_similarities']
+                temperature = output_feature[LOSS][
+                    'class_similarities_temperature']
+
+                curr_row = 0
+                first_row_length = 0
+                is_first_row = True
+                for row in similarities:
+                    if is_first_row:
+                        first_row_length = len(row)
+                        is_first_row = False
+                        curr_row += 1
+                    else:
+                        curr_row_length = len(row)
+                        if curr_row_length != first_row_length:
+                            raise ValueError(
+                                'The length of row {} of the class_similarities '
+                                'of {} is {}, different from the length of '
+                                'the first row {}. All rows must have '
+                                'the same length.'.format(
+                                    curr_row,
+                                    output_feature['name'],
+                                    curr_row_length,
+                                    first_row_length
+                                )
+                            )
+                        else:
+                            curr_row += 1
+                all_rows_length = first_row_length
+
+                if all_rows_length != len(similarities):
+                    raise ValueError(
+                        'The class_similarities matrix of {} has '
+                        '{} rows and {} columns, '
+                        'their number must be identical.'.format(
+                            output_feature['name'],
+                            len(similarities),
+                            all_rows_length
+                        )
+                    )
+
+                if all_rows_length != output_feature['num_classes']:
+                    raise ValueError(
+                        'The size of the class_similarities matrix of {} is '
+                        '{}, different from the number of classe ({}). '
+                        'Check the metadata JSON file to see the classes '
+                        'and their order and '
+                        'consider <UNK> class too.'.format(
+                            output_feature['name'],
+                            all_rows_length,
+                            output_feature['num_classes']
+                        )
+                    )
+
+                similarities = np.array(similarities, dtype=np.float32)
+                for i in range(len(similarities)):
+                    similarities[i, :] = softmax(
+                        similarities[i, :],
                         temperature=temperature
                     )
 
-                output_feature[LOSS]['distances'] = distances
+                output_feature[LOSS]['class_similarities'] = similarities
             else:
                 raise ValueError(
-                    'No class_distance metadata available for '
-                    'feature {}'.format(output_feature['name'])
+                    'class_similarities_temperature > 0, '
+                    'but no class_similarities are provided '
+                    'for feature {}'.format(output_feature['name'])
                 )
 
         if output_feature[LOSS]['type'] == 'sampled_softmax_cross_entropy':
@@ -547,7 +630,7 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
             result,
             metadata,
             experiment_dir_name,
-            skip_save_unprocessed_output=False
+            skip_save_unprocessed_output=False,
     ):
         postprocessed = {}
         npy_filename = os.path.join(experiment_dir_name, '{}_{}.npy')
@@ -572,11 +655,11 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
             probs = result[PROBABILITIES]
             prob = np.amax(probs, axis=1)
             postprocessed[PROBABILITIES] = probs
-            postprocessed['probability'] = prob
+            postprocessed[PROBABILITY] = prob
 
             if not skip_save_unprocessed_output:
                 np.save(npy_filename.format(name, PROBABILITIES), probs)
-                np.save(npy_filename.format(name, 'probability'), probs)
+                np.save(npy_filename.format(name, PROBABILITY), probs)
 
             del result[PROBABILITIES]
 
@@ -604,37 +687,52 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
 
     @staticmethod
     def populate_defaults(output_feature):
-        set_default_value(
-            output_feature,
-            LOSS,
+        # If Loss is not defined, set an empty dictionary
+        set_default_value(output_feature, LOSS, {})
+
+        # Populate the default values for LOSS if they aren't defined already
+        set_default_values(
+            output_feature[LOSS],
             {
                 'type': 'softmax_cross_entropy',
                 'sampler': None,
                 'negative_samples': 0,
                 'distortion': 1,
+                'unique': False,
                 'labels_smoothing': 0,
                 'class_weights': 1,
                 'robust_lambda': 0,
                 'confidence_penalty': 0,
-                'class_distance_temperature': 0,
+                'class_similarities_temperature': 0,
                 'weight': 1
             }
         )
-        set_default_value(output_feature[LOSS], 'type', 'softmax_cross_entropy')
 
         if output_feature[LOSS]['type'] == 'sampled_softmax_cross_entropy':
-            set_default_value(output_feature[LOSS], 'sampler', 'log_uniform')
-            set_default_value(output_feature[LOSS], 'negative_samples', 25)
-            set_default_value(output_feature[LOSS], 'distortion', 0.75)
+            set_default_values(
+                output_feature[LOSS],
+                {
+                    'sampler': 'log_uniform',
+                    'negative_samples': 25,
+                    'distortion': 0.75
+                }
+            )
         else:
-            set_default_value(output_feature[LOSS], 'sampler', None)
-            set_default_value(output_feature[LOSS], 'negative_samples', 0)
-            set_default_value(output_feature[LOSS], 'distortion', 1)
+            set_default_values(
+                output_feature[LOSS],
+                {
+                    'sampler': None,
+                    'negative_samples': 0,
+                    'distortion': 1
+                }
+            )
 
-        set_default_value(output_feature[LOSS], 'unique', False)
-        set_default_value(output_feature[LOSS], 'weight', 1)
-
-        set_default_value(output_feature, 'top_k', 3)
-        set_default_value(output_feature, 'dependencies', [])
-        set_default_value(output_feature, 'reduce_input', SUM)
-        set_default_value(output_feature, 'reduce_dependencies', SUM)
+        set_default_values(
+            output_feature,
+            {
+                'top_k': 3,
+                'dependencies': [],
+                'reduce_input': SUM,
+                'reduce_dependencies': SUM
+            }
+        )

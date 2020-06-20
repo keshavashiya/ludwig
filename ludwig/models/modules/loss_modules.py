@@ -60,30 +60,32 @@ def mean_confidence_penalty(probabilities, num_classes):
 
 def seq2seq_sequence_loss(targets, targets_sequence_length, logits,
                           softmax_function=None):
-    batch_max_targets_sequence_lenght = tf.shape(targets)[1]
-    batch_max_logits_sequence_lenght = tf.shape(logits)[1]
-    difference = batch_max_targets_sequence_lenght - batch_max_logits_sequence_lenght
+    batch_max_targets_sequence_length = tf.shape(targets)[1]
+    batch_max_logits_sequence_length = tf.shape(logits)[1]
+    difference = tf.maximum(0,
+                            batch_max_targets_sequence_length - batch_max_logits_sequence_length)
     padded_logits = tf.pad(logits, [[0, 0], [0, difference], [0, 0]])
+    padded_logits = padded_logits[:, :batch_max_targets_sequence_length, :]
 
-    with tf.variable_scope('sequence_loss'):
+    with tf.compat.v1.variable_scope('sequence_loss'):
         sequence_loss = tf.contrib.seq2seq.sequence_loss(
             padded_logits,
             targets,
             tf.sequence_mask(targets_sequence_length,
-                             batch_max_targets_sequence_lenght,
+                             batch_max_targets_sequence_length,
                              dtype=tf.float32),
             average_across_timesteps=True,
             average_across_batch=False,
             softmax_loss_function=softmax_function
         )
 
-    # batch_max_seq_lenght = tf.shape(logits)[1]
+    # batch_max_seq_length = tf.shape(logits)[1]
     # unpadded_targets = targets[:, :tf.shape(logits)[1]]
-    # with tf.variable_scope('sequence_loss'):
+    # with tf.compat.v1.variable_scope('sequence_loss'):
     #     sequence_loss = tf.contrib.seq2seq.sequence_loss(
     #         logits,
     #         unpadded_targets,
-    #         tf.sequence_mask(targets_sequence_length, batch_max_seq_lenght, dtype=tf.float32),
+    #         tf.sequence_mask(targets_sequence_length, batch_max_seq_length, dtype=tf.float32),
     #         average_across_timesteps=True,
     #         average_across_batch=False,
     #         softmax_loss_function=softmax_function
@@ -104,59 +106,23 @@ def cross_entropy_sequence_loss(logits, targets, sequence_length):
     Returns:
       A tensor of shape [T, B] that contains the loss per example, per time step.
     """
-    with tf.variable_scope('sequence_loss'):
+    with tf.compat.v1.variable_scope('sequence_loss'):
         losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
             logits=logits, labels=targets)
         # Mask out the losses we don't care about
         loss_mask = tf.sequence_mask(
-            tf.to_int32(sequence_length), tf.to_int32(tf.shape(targets)[1]))
-        losses = losses * tf.to_float(loss_mask)
+            tf.cast(sequence_length, tf.int32),
+            tf.cast(tf.shape(targets)[1], tf.int32)
+        )
+        losses = losses * tf.cast(loss_mask, tf.float32)
         return losses
 
 
 def sampled_softmax_cross_entropy(output_placeholder, feature_hidden, logits,
                                   vector_labels, class_weights,
                                   class_biases, loss, num_classes):
-    output_exp = tf.cast(tf.expand_dims(output_placeholder, -1), tf.int64)
-    if loss['sampler'] == 'fixed_unigram':
-        sampled_values = tf.nn.fixed_unigram_candidate_sampler(
-            true_classes=output_exp,
-            num_true=1,
-            num_sampled=loss['negative_samples'],
-            unique=loss['unique'],
-            range_max=num_classes,
-            unigrams=loss['class_counts'],
-            distortion=loss['distortion']
-        )
-    elif loss['sampler'] == 'uniform':
-        sampled_values = tf.nn.uniform_candidate_sampler(
-            true_classes=output_exp,
-            num_true=1,
-            num_sampled=loss['negative_samples'],
-            unique=loss['unique'],
-            range_max=num_classes
-        )
-    elif loss['sampler'] == 'log_uniform':
-        sampled_values = tf.nn.log_uniform_candidate_sampler(
-            true_classes=output_exp,
-            num_true=1,
-            num_sampled=loss['negative_samples'],
-            unique=loss['unique'],
-            range_max=num_classes
-        )
-    elif loss['sampler'] == 'learned_unigram':
-        sampled_values = tf.nn.fixed_unigram_candidate_sampler(
-            true_classes=output_exp,
-            num_true=1,
-            num_sampled=loss['negative_samples'],
-            unique=loss['unique'],
-            range_max=num_classes,
-            unigrams=loss['class_counts'],
-            distortion=loss['distortion']
-        )
-    else:
-        raise ValueError('Unsupported sampler {}'.format(loss['sampler']))
-
+    output_exp = tf.cast(tf.expand_dims(output_placeholder, -1), tf.int64)    
+    sampled_values = obtained_sampled_values(num_classes, output_exp, loss)
     train_loss = tf.nn.sampled_softmax_loss(weights=tf.transpose(class_weights),
                                             biases=class_biases,
                                             labels=output_exp,
@@ -178,23 +144,115 @@ def sequence_sampled_softmax_cross_entropy(targets, targets_sequence_length,
                                            class_weights,
                                            class_biases, loss,
                                            num_classes):
-    batch_max_targets_sequence_lenght = tf.shape(targets)[1]
+    batch_max_targets_sequence_length = tf.shape(targets)[1]
 
-    batch_max_train_logits_sequence_lenght = tf.shape(train_logits)[1]
-    difference_train = batch_max_targets_sequence_lenght - batch_max_train_logits_sequence_lenght
+    batch_max_train_logits_sequence_length = tf.shape(train_logits)[1]
+    difference_train = batch_max_targets_sequence_length - batch_max_train_logits_sequence_length
     padded_train_logits = tf.pad(train_logits,
                                  [[0, 0], [0, difference_train], [0, 0]])
 
-    batch_max_eval_logits_sequence_lenght = tf.shape(eval_logits)[1]
-    difference_eval = batch_max_targets_sequence_lenght - batch_max_eval_logits_sequence_lenght
+    batch_max_eval_logits_sequence_length = tf.shape(eval_logits)[1]
+    difference_eval = batch_max_targets_sequence_length - batch_max_eval_logits_sequence_length
     padded_eval_logits = tf.pad(eval_logits,
                                 [[0, 0], [0, difference_eval], [0, 0]])
 
-    # batch_max_seq_lenght = tf.shape(train_logits)[1]
-    # unpadded_targets = targets[:, :batch_max_seq_lenght]
+    # batch_max_seq_length = tf.shape(train_logits)[1]
+    # unpadded_targets = targets[:, :batch_max_seq_length]
     # output_exp = tf.cast(tf.reshape(unpadded_targets, [-1, 1]), tf.int64)
     output_exp = tf.cast(tf.reshape(targets, [-1, 1]), tf.int64)
+    sampled_values = obtained_sampled_values(num_classes, output_exp, loss)
 
+    def _sampled_loss(labels, logits):
+        labels = tf.cast(labels, tf.int64)
+        labels = tf.reshape(labels, [-1, 1])
+        logits = tf.cast(logits, tf.float32)
+
+        return tf.cast(
+            tf.nn.sampled_softmax_loss(weights=tf.transpose(class_weights),
+                                       biases=class_biases,
+                                       labels=labels,
+                                       inputs=logits,
+                                       num_sampled=loss['negative_samples'],
+                                       num_classes=num_classes,
+                                       sampled_values=sampled_values),
+            tf.float32)
+
+    train_loss = tf.contrib.seq2seq.sequence_loss(
+        padded_train_logits,
+        targets,
+        tf.sequence_mask(targets_sequence_length,
+                         batch_max_targets_sequence_length, dtype=tf.float32),
+        average_across_timesteps=True,
+        average_across_batch=False,
+        softmax_loss_function=_sampled_loss
+    )
+
+    # batch_max_seq_length_eval = tf.shape(eval_logits)[1]
+    # unpadded_targets_eval = targets[:, :batch_max_seq_length_eval]
+
+    eval_loss = tf.contrib.seq2seq.sequence_loss(
+        padded_eval_logits,
+        targets,
+        tf.sequence_mask(targets_sequence_length,
+                         batch_max_targets_sequence_length, dtype=tf.float32),
+        average_across_timesteps=True,
+        average_across_batch=False
+    )
+
+    return train_loss, eval_loss
+
+
+def weighted_softmax_cross_entropy(logits, vector_labels, loss):
+    use_class_weights = not isinstance(loss['class_weights'], (int, float))
+    if use_class_weights:
+        train_loss = softmax_cross_entropy_with_class_weighting(
+            logits,
+            vector_labels,
+            loss['class_weights'],
+            loss['labels_smoothing']
+        )
+    else:
+        train_loss = tf.compat.v1.losses.softmax_cross_entropy(
+            onehot_labels=vector_labels,
+            logits=logits,
+            label_smoothing=loss[
+                'labels_smoothing'],
+            reduction=Reduction.NONE)
+    return train_loss
+
+
+def loss_multilabel(logits, vector_labels, loss):
+    # input: `logits` and `labels` must have the same shape `[batch_size, num_classes]`
+    # output: A 1-D `Tensor` of length `batch_size` of the same type as `logits` with the softmax cross entropy loss.
+    # let `x = logits`, `z = labels`.  The logistic loss is:z * -log(sigmoid(x)) + (1 - z) * -log(1 - sigmoid(x))
+    use_class_weights = not isinstance(loss['class_weights'], (int, float))
+    if use_class_weights:
+        train_loss = sigmoid_cross_entropy_with_class_weighting(
+            logits,
+            vector_labels,
+            loss['class_weights'],
+            loss['labels_smoothing']
+        )
+    else:
+        train_loss = tf.losses.sigmoid_cross_entropy(
+            multi_class_labels=vector_labels,
+            logits=logits,
+            label_smoothing=loss[
+                'labels_smoothing'],
+            reduction=Reduction.NONE)
+    return train_loss
+
+
+regularizer_registry = {'l1': tf.contrib.layers.l1_regularizer,
+                        'l2': tf.contrib.layers.l2_regularizer,
+                        'sum': tf.contrib.layers.sum_regularizer,
+                        'None': lambda x: None,
+                        None: lambda x: None}
+
+
+
+def obtained_sampled_values(num_classes, output_exp, loss):
+    """returns sampled_values using the chosen sampler"""
     if loss['sampler'] == 'fixed_unigram':
         sampled_values = tf.nn.fixed_unigram_candidate_sampler(
             true_classes=output_exp,
@@ -233,90 +291,4 @@ def sequence_sampled_softmax_cross_entropy(targets, targets_sequence_length,
         )
     else:
         raise ValueError('Unsupported sampler {}'.format(loss['sampler']))
-
-    def _sampled_loss(labels, logits):
-        labels = tf.cast(labels, tf.int64)
-        labels = tf.reshape(labels, [-1, 1])
-        logits = tf.cast(logits, tf.float32)
-
-        return tf.cast(
-            tf.nn.sampled_softmax_loss(weights=tf.transpose(class_weights),
-                                       biases=class_biases,
-                                       labels=labels,
-                                       inputs=logits,
-                                       num_sampled=loss['negative_samples'],
-                                       num_classes=num_classes,
-                                       sampled_values=sampled_values),
-            tf.float32)
-
-    train_loss = tf.contrib.seq2seq.sequence_loss(
-        padded_train_logits,
-        targets,
-        tf.sequence_mask(targets_sequence_length,
-                         batch_max_targets_sequence_lenght, dtype=tf.float32),
-        average_across_timesteps=True,
-        average_across_batch=False,
-        softmax_loss_function=_sampled_loss
-    )
-
-    # batch_max_seq_lenght_eval = tf.shape(eval_logits)[1]
-    # unpadded_targets_eval = targets[:, :batch_max_seq_lenght_eval]
-
-    eval_loss = tf.contrib.seq2seq.sequence_loss(
-        padded_eval_logits,
-        targets,
-        tf.sequence_mask(targets_sequence_length,
-                         batch_max_targets_sequence_lenght, dtype=tf.float32),
-        average_across_timesteps=True,
-        average_across_batch=False
-    )
-
-    return train_loss, eval_loss
-
-
-def weighted_softmax_cross_entropy(logits, vector_labels, loss):
-    use_class_weights = not isinstance(loss['class_weights'], (int, float))
-    if use_class_weights:
-        train_loss = softmax_cross_entropy_with_class_weighting(logits,
-                                                                vector_labels,
-                                                                loss[
-                                                                    'class_weights'],
-                                                                loss[
-                                                                    'labels_smoothing'])
-    else:
-        train_loss = tf.losses.softmax_cross_entropy(
-            onehot_labels=vector_labels,
-            logits=logits,
-            label_smoothing=loss[
-                'labels_smoothing'],
-            reduction=Reduction.NONE)
-    return train_loss
-
-
-def loss_multilabel(logits, vector_labels, loss):
-    # input: `logits` and `labels` must have the same shape `[batch_size, num_classes]`
-    # output: A 1-D `Tensor` of length `batch_size` of the same type as `logits` with the softmax cross entropy loss.
-    # let `x = logits`, `z = labels`.  The logistic loss is:z * -log(sigmoid(x)) + (1 - z) * -log(1 - sigmoid(x))
-    use_class_weights = not isinstance(loss['class_weights'], (int, float))
-    if use_class_weights:
-        train_loss = sigmoid_cross_entropy_with_class_weighting(logits,
-                                                                vector_labels,
-                                                                loss[
-                                                                    'class_weights'],
-                                                                loss[
-                                                                    'labels_smoothing'])
-    else:
-        train_loss = tf.losses.sigmoid_cross_entropy(
-            multi_class_labels=vector_labels,
-            logits=logits,
-            label_smoothing=loss[
-                'labels_smoothing'],
-            reduction=Reduction.NONE)
-    return train_loss
-
-
-regularizer_registry = {'l1': tf.contrib.layers.l1_regularizer,
-                        'l2': tf.contrib.layers.l2_regularizer,
-                        'sum': tf.contrib.layers.sum_regularizer,
-                        'None': lambda x: None,
-                        None: lambda x: None}
+    return sampled_values

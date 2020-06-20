@@ -18,11 +18,11 @@ import tensorflow as tf
 from ludwig.constants import *
 from ludwig.utils.tf_utils import to_sparse
 
-measures = {ACCURACY, OVERALL_ACCURACY, HITS_AT_K, R2, JACCARD, EDIT_DISTANCE,
+measures = {ACCURACY, TOKEN_ACCURACY, HITS_AT_K, R2, JACCARD, EDIT_DISTANCE,
             MEAN_SQUARED_ERROR, MEAN_ABSOLUTE_ERROR,
             PERPLEXITY}
 
-max_measures = {ACCURACY, OVERALL_ACCURACY, HITS_AT_K, R2, JACCARD}
+max_measures = {ACCURACY, TOKEN_ACCURACY, HITS_AT_K, R2, JACCARD}
 min_measures = {EDIT_DISTANCE, MEAN_SQUARED_ERROR, MEAN_ABSOLUTE_ERROR, LOSS,
                 PERPLEXITY}
 
@@ -74,12 +74,13 @@ def masked_accuracy(targets, predictions, sequence_lengths,
 
     filtered_out, masked_correct_predictions = tf.dynamic_partition(
         correct_predictions, mask, 2)
-    overall_accuracy = tf.reduce_mean(
+    token_accuracy = tf.reduce_mean(
         tf.cast(masked_correct_predictions, tf.float32),
-        name='overall_accuracy_{}'.format(output_feature_name))
+        name='token_accuracy_{}'.format(output_feature_name))
 
-    one_masked_correct_prediction = 1.0 - tf.to_float(mask) + (
-                tf.to_float(mask) * tf.to_float(correct_predictions))
+    one_masked_correct_prediction = 1.0 - tf.cast(mask, tf.float32) + (
+            tf.cast(mask, tf.float32) * tf.cast(correct_predictions,
+                                                tf.float32))
     rowwise_correct_predictions = tf.reduce_prod(one_masked_correct_prediction,
                                                  axis=-1,
                                                  name='rowwise_correct_predictions_{}'.format(
@@ -88,7 +89,7 @@ def masked_accuracy(targets, predictions, sequence_lengths,
                                       name='rowwise_accuracy_{}'.format(
                                           output_feature_name))
 
-    return overall_accuracy, masked_correct_predictions, rowwise_accuracy, rowwise_correct_predictions
+    return token_accuracy, masked_correct_predictions, rowwise_accuracy, rowwise_correct_predictions
 
 
 def hits_at_k(targets, predictions_logits, top_k, output_feature_name):
@@ -133,19 +134,19 @@ def perplexity(cross_entropy_loss):
 
 
 def error(targets, predictions, output_feature_name):
-    # return tf.get_variable('error_{}'.format(output_feature_name), initializer=tf.subtract(targets, predictions))
+    # return tf.compat.v1.get_variable('error_{}'.format(output_feature_name), initializer=tf.subtract(targets, predictions))
     return tf.subtract(targets, predictions,
                        name='error_{}'.format(output_feature_name))
 
 
 def absolute_error(targets, predictions, output_feature_name):
-    # error = tf.get_variable('error_{}'.format(output_feature_name), initializer=tf.subtract(targets, predictions))
+    # error = tf.compat.v1.get_variable('error_{}'.format(output_feature_name), initializer=tf.subtract(targets, predictions))
     error = tf.subtract(targets, predictions)
     return tf.abs(error, name='absolute_error_{}'.format(output_feature_name))
 
 
 def squared_error(targets, predictions, output_feature_name):
-    # error = tf.get_variable('error_{}'.format(output_feature_name), initializer=tf.subtract(targets, predictions))
+    # error = tf.compat.v1.get_variable('error_{}'.format(output_feature_name), initializer=tf.subtract(targets, predictions))
     error = tf.subtract(targets, predictions)
     return tf.pow(error, 2, name='squared_error_{}'.format(output_feature_name))
 

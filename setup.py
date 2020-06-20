@@ -12,16 +12,44 @@ here = path.abspath(path.dirname(__file__))
 with open(path.join(here, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
 
+with open(path.join(here, 'requirements.txt'), encoding='utf-8') as f:
+    requirements = [line.strip() for line in f if line]
+
+extra_requirements = {}
+
+with open(path.join(here, 'requirements_audio.txt'), encoding='utf-8') as f:
+    extra_requirements['audio'] = [line.strip() for line in f if line]
+
+with open(path.join(here, 'requirements_image.txt'), encoding='utf-8') as f:
+    extra_requirements['image'] = [line.strip() for line in f if line]
+
+with open(path.join(here, 'requirements_serve.txt'), encoding='utf-8') as f:
+    extra_requirements['serve'] = [line.strip() for line in f if line]
+
+with open(path.join(here, 'requirements_text.txt'), encoding='utf-8') as f:
+    extra_requirements['text'] = [line.strip() for line in f if line]
+
+with open(path.join(here, 'requirements_viz.txt'), encoding='utf-8') as f:
+    extra_requirements['viz'] = [line.strip() for line in f if line]
+
+extra_requirements['full'] = [item for sublist in extra_requirements.values()
+                              for item in sublist]
+
+with open(path.join(here, 'requirements_test.txt'), encoding='utf-8') as f:
+    extra_requirements['test'] = (
+            extra_requirements['full'] + [line.strip() for line in f if line]
+    )
+
 setup(
     name='ludwig',
-
-    version='0.1.0',
+    version='0.2.2.8',
 
     description='A deep learning experimentation toolbox',
     long_description=long_description,
     long_description_content_type='text/markdown',
 
-    url='https://ludwig.ai',
+    url='https://github.com/uber/ludwig',
+    download_url='https://pypi.org/project/ludwig/',
 
     author='Piero Molino',
     author_email='piero.molino@gmail.com',
@@ -32,26 +60,13 @@ setup(
 
     packages=find_packages(exclude=['contrib', 'docs', 'tests']),
 
-    python_requires='>=3',
+    python_requires='>=3.6',
 
     include_package_data=True,
     package_data={'ludwig': ['etc/*', 'examples/*.py']},
 
-    install_requires=['Cython>=0.25',
-                      'h5py>=2.6',
-                      'matplotlib>=3.0',
-                      'numpy>=1.15',
-                      'pandas>=0.19',
-                      'scipy>=0.18',
-                      'scikit-learn',
-                      'scikit-image==0.14.2',
-                      'seaborn>=0.7',
-                      'spacy>=2.0',
-                      'tqdm',
-                      'tabulate>=0.7',
-                      'tensorflow>=1.12',
-                      'PyYAML>=3.12'
-                      ],
+    install_requires=requirements,
+    extras_require=extra_requirements,
 
     entry_points={
         'console_scripts': [
