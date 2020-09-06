@@ -16,13 +16,13 @@
 # ==============================================================================
 import collections
 import csv
+import functools
 import json
 import logging
 import os.path
 import pickle
 import random
 import re
-import functools
 
 import h5py
 import numpy as np
@@ -196,7 +196,8 @@ def load_pretrained_embeddings(embeddings_path, vocab):
             embeddings_vectors.append(embeddings[word])
         else:
             embeddings_vectors.append(
-                avg_embedding + np.random.uniform(-0.01, 0.01, embeddings_size))
+                avg_embedding + np.random.uniform(-0.01, 0.01, embeddings_size)
+            )
     embeddings_matrix = np.stack(embeddings_vectors)
 
     # let's help the garbage collector free some memory
@@ -467,3 +468,8 @@ def get_path_size(
                     total_size += os.path.getsize(filepath)
 
     return total_size
+
+
+def clear_data_cache():
+    """Clears any cached data objects (e.g., embeddings)"""
+    load_glove.cache_clear()

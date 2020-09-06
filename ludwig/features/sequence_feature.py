@@ -14,37 +14,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-import logging
 import os
-from collections import OrderedDict
 
 import numpy as np
-import tensorflow as tf
 
 from ludwig.constants import *
-from ludwig.features.base_feature import BaseFeature
+from ludwig.decoders.sequence_decoders import SequenceGeneratorDecoder
+from ludwig.decoders.sequence_decoders import SequenceTaggerDecoder
+from ludwig.encoders.sequence_encoders import ParallelCNN
+from ludwig.encoders.sequence_encoders import SequenceEmbedEncoder
+from ludwig.encoders.sequence_encoders import SequencePassthroughEncoder
+from ludwig.encoders.sequence_encoders import StackedCNN
+from ludwig.encoders.sequence_encoders import StackedCNNRNN
+from ludwig.encoders.sequence_encoders import StackedParallelCNN
+from ludwig.encoders.sequence_encoders import StackedRNN
+from ludwig.encoders.text_encoders import *
 from ludwig.features.base_feature import InputFeature
 from ludwig.features.base_feature import OutputFeature
-from ludwig.models.modules.loss_modules import seq2seq_sequence_loss
-from ludwig.models.modules.loss_modules import \
-    sequence_sampled_softmax_cross_entropy
-from ludwig.models.modules.measure_modules import accuracy
-from ludwig.models.modules.measure_modules import edit_distance
-from ludwig.models.modules.measure_modules import masked_accuracy
-from ludwig.models.modules.measure_modules import perplexity
-from ludwig.models.modules.sequence_decoders import Generator
-from ludwig.models.modules.sequence_decoders import Tagger
-from ludwig.models.modules.sequence_encoders import BERT
-from ludwig.models.modules.sequence_encoders import CNNRNN, PassthroughEncoder
-from ludwig.models.modules.sequence_encoders import EmbedEncoder
-from ludwig.models.modules.sequence_encoders import ParallelCNN
-from ludwig.models.modules.sequence_encoders import RNN
-from ludwig.models.modules.sequence_encoders import StackedCNN
-from ludwig.models.modules.sequence_encoders import StackedParallelCNN
+from ludwig.globals import is_on_master
+from ludwig.modules.loss_modules import SampledSoftmaxCrossEntropyLoss
+from ludwig.modules.loss_modules import SequenceLoss
+from ludwig.modules.metric_modules import EditDistanceMetric
+from ludwig.modules.metric_modules import PerplexityMetric
+from ludwig.modules.metric_modules import SequenceLastAccuracyMetric
+from ludwig.modules.metric_modules import SequenceLossMetric
+from ludwig.modules.metric_modules import TokenAccuracyMetric
 from ludwig.utils.math_utils import softmax
 from ludwig.utils.metrics_utils import ConfusionMatrix
-from ludwig.utils.misc import get_from_registry
-from ludwig.utils.misc import set_default_value
+from ludwig.utils.misc_utils import set_default_value
 from ludwig.utils.strings_utils import PADDING_SYMBOL
 from ludwig.utils.strings_utils import UNKNOWN_SYMBOL
 from ludwig.utils.strings_utils import build_sequence_matrix
@@ -53,10 +50,8 @@ from ludwig.utils.strings_utils import create_vocabulary
 logger = logging.getLogger(__name__)
 
 
-class SequenceBaseFeature(BaseFeature):
-    def __init__(self, feature):
-        super().__init__(feature)
-        self.type = SEQUENCE
+class SequenceFeatureMixin(object):
+    type = SEQUENCE
 
     preprocessing_defaults = {
         'sequence_length_limit': 256,
@@ -73,13 +68,14 @@ class SequenceBaseFeature(BaseFeature):
 
     @staticmethod
     def get_feature_meta(column, preprocessing_parameters):
-        idx2str, str2idx, str2freq, max_length = create_vocabulary(
+        idx2str, str2idx, str2freq, max_length, _, _, _ = create_vocabulary(
             column, preprocessing_parameters['tokenizer'],
             lowercase=preprocessing_parameters['lowercase'],
             num_most_frequent=preprocessing_parameters['most_common'],
             vocab_file=preprocessing_parameters['vocab_file'],
             unknown_symbol=preprocessing_parameters['unknown_symbol'],
             padding_symbol=preprocessing_parameters['padding_symbol'],
+
         )
         max_length = min(
             preprocessing_parameters['sequence_length_limit'],
@@ -106,7 +102,7 @@ class SequenceBaseFeature(BaseFeature):
             lowercase=preprocessing_parameters['lowercase'],
             tokenizer_vocab_file=preprocessing_parameters[
                 'vocab_file'
-            ],
+            ]
         )
         return sequence_data
 
@@ -124,73 +120,39 @@ class SequenceBaseFeature(BaseFeature):
         data[feature['name']] = sequence_data
 
 
-class SequenceInputFeature(SequenceBaseFeature, InputFeature):
-    def __init__(self, feature):
+class SequenceInputFeature(SequenceFeatureMixin, InputFeature):
+    encoder = 'embed'
+    max_sequence_length = None
+
+    def __init__(self, feature, encoder_obj=None):
         super().__init__(feature)
+        self.overwrite_defaults(feature)
+        if encoder_obj:
+            self.encoder_obj = encoder_obj
+        else:
+            self.encoder_obj = self.initialize_encoder(feature)
 
-        self.encoder = 'parallel_cnn'
-        self.length = 0
 
-        encoder_parameters = self.overwrite_defaults(feature)
+    def call(self, inputs, training=None, mask=None):
+        assert isinstance(inputs, tf.Tensor)
+        assert inputs.dtype == tf.int8 or inputs.dtype == tf.int16 or \
+               inputs.dtype == tf.int32 or inputs.dtype == tf.int64
+        assert len(inputs.shape) == 2
 
-        self.encoder_obj = self.get_sequence_encoder(encoder_parameters)
-
-    def get_sequence_encoder(self, encoder_parameters):
-        return get_from_registry(
-            self.encoder, sequence_encoder_registry)(
-            **encoder_parameters
+        inputs_exp = tf.cast(inputs, dtype=tf.int32)
+        inputs_mask = tf.not_equal(inputs, 0)
+        lengths = tf.reduce_sum(tf.cast(inputs_mask, dtype=tf.int32), axis=1)
+        encoder_output = self.encoder_obj(
+            inputs_exp, training=training, mask=inputs_mask
         )
+        encoder_output[LENGTHS] = lengths
+        return encoder_output
 
-    def _get_input_placeholder(self):
-        # None dimension is for dealing with variable batch size
-        return tf.compat.v1.placeholder(
-            tf.int32,
-            shape=[None, None],
-            name='{}_placeholder'.format(self.name)
-        )
+    def get_input_dtype(self):
+        return tf.int32
 
-    def build_input(
-            self,
-            regularizer,
-            dropout_rate,
-            is_training=False,
-            **kwargs
-    ):
-        placeholder = self._get_input_placeholder()
-        logger.debug('  placeholder: {0}'.format(placeholder))
-
-        return self.build_sequence_input(
-            placeholder,
-            self.encoder_obj,
-            regularizer,
-            dropout_rate,
-            is_training=is_training
-        )
-
-    def build_sequence_input(
-            self,
-            placeholder,
-            encoder,
-            regularizer,
-            dropout_rate,
-            is_training
-    ):
-        feature_representation, feature_representation_size = encoder(
-            placeholder,
-            regularizer=regularizer,
-            dropout_rate=dropout_rate,
-            is_training=is_training
-        )
-        logger.debug('  feature_representation: {0}'.format(
-            feature_representation))
-
-        feature_representation = {
-            'type': self.type,
-            'representation': feature_representation,
-            'size': feature_representation_size,
-            'placeholder': placeholder
-        }
-        return feature_representation
+    def get_input_shape(self):
+        return None,
 
     @staticmethod
     def update_model_definition_with_metadata(
@@ -200,414 +162,105 @@ class SequenceInputFeature(SequenceBaseFeature, InputFeature):
             **kwargs
     ):
         input_feature['vocab'] = feature_metadata['idx2str']
-        input_feature['length'] = feature_metadata['max_sequence_length']
+        input_feature['max_sequence_length'] = feature_metadata[
+            'max_sequence_length']
 
     @staticmethod
     def populate_defaults(input_feature):
-        set_default_value(input_feature, 'tied_weights', None)
+        set_default_value(input_feature, TIED, None)
         set_default_value(input_feature, 'encoder', 'parallel_cnn')
 
+    encoder_registry = {
+        'stacked_cnn': StackedCNN,
+        'parallel_cnn': ParallelCNN,
+        'stacked_parallel_cnn': StackedParallelCNN,
+        'rnn': StackedRNN,
+        'cnnrnn': StackedCNNRNN,
+        'embed': SequenceEmbedEncoder,
+        'passthrough': SequencePassthroughEncoder,
+        'null': SequencePassthroughEncoder,
+        'none': SequencePassthroughEncoder,
+        'None': SequencePassthroughEncoder,
+        None: SequencePassthroughEncoder
+    }
 
-class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
+
+class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
+    decoder = 'generator'
+    loss = {TYPE: SOFTMAX_CROSS_ENTROPY}
+    metric_functions = {LOSS: None, TOKEN_ACCURACY: None, LAST_ACCURACY: None,
+                        PERPLEXITY: None, EDIT_DISTANCE: None}
+    default_validation_metric = LOSS
+    max_sequence_length = 0
+    num_classes = 0
+
     def __init__(self, feature):
         super().__init__(feature)
-        self.type = SEQUENCE
+        self.overwrite_defaults(feature)
+        self.decoder_obj = self.initialize_decoder(feature)
+        self._setup_loss()
+        self._setup_metrics()
 
-        self.decoder = 'generator'
-        self.max_sequence_length = 0
-        self.loss = {
-            'type': SOFTMAX_CROSS_ENTROPY,
-            'sampler': None,
-            'negative_samples': 0,
-            'distortion': 1,
-            'labels_smoothing': 0,
-            'class_weights': 1,
-            'robust_lambda': 0,
-            'confidence_penalty': 0,
-            'class_similarities_temperature': 0,
-            'weight': 1
-        }
-        self.num_classes = 0
-
-        _ = self.overwrite_defaults(feature)
-
-        self.decoder_obj = self.get_sequence_decoder(feature)
-
-    def get_sequence_decoder(self, decoder_parameters):
-        return get_from_registry(
-            self.decoder, sequence_decoder_registry)(
-            **decoder_parameters
-        )
-
-    def _get_output_placeholder(self):
-        # None dimension is for dealing with variable batch size
-        return tf.compat.v1.placeholder(
-            tf.int32,
-            [None, self.max_sequence_length],
-            name='{}_placeholder'.format(self.name)
-        )
-
-    def build_output(
-            self,
-            hidden,
-            hidden_size,
-            regularizer=None,
-            dropout_rate=None,
-            is_training=None,
-            **kwargs
-    ):
-        train_mean_loss, eval_loss, output_tensors = self.build_sequence_output(
-            self._get_output_placeholder(),
-            self.decoder_obj,
-            hidden,
-            hidden_size,
-            regularizer=regularizer,
-            kwarg=kwargs
-        )
-        return train_mean_loss, eval_loss, output_tensors
-
-    def build_sequence_output(
-            self,
-            targets,
-            decoder,
-            hidden,
-            hidden_size,
-            regularizer=None,
-            **kwargs
-    ):
-        feature_name = self.name
-        output_tensors = {}
-
-        # ================ Placeholder ================
-        output_tensors['{}'.format(feature_name)] = targets
-
-        # ================ Predictions ================
-        (
-            predictions_sequence, predictions_sequence_scores,
-            predictions_sequence_length, last_predictions,
-            probabilities_sequence, targets_sequence_length, last_targets,
-            eval_logits, train_logits, class_weights, class_biases
-        ) = self.sequence_predictions(
-            targets,
-            decoder,
-            hidden,
-            hidden_size,
-            regularizer=regularizer
-        )
-
-        output_tensors[LAST_PREDICTIONS + '_' + feature_name] = last_predictions
-        output_tensors[PREDICTIONS + '_' + feature_name] = predictions_sequence
-        output_tensors[
-            PROBABILITIES + '_' + feature_name
-            ] = predictions_sequence_scores
-        output_tensors[
-            LENGTHS + '_' + feature_name
-            ] = predictions_sequence_length
-
-        # ================ Loss ================
-        train_mean_loss, eval_loss = self.sequence_loss(
-            targets,
-            targets_sequence_length,
-            eval_logits,
-            train_logits,
-            class_weights,
-            class_biases
-        )
-
-        output_tensors[TRAIN_MEAN_LOSS + '_' + feature_name] = train_mean_loss
-        output_tensors[EVAL_LOSS + '_' + feature_name] = eval_loss
-
-        tf.compat.v1.summary.scalar(
-            'batch_train_mean_loss_{}'.format(self.name),
-            train_mean_loss,
-        )
-
-        # ================ Measures ================
-        (
-            correct_last_predictions, last_accuracy,
-            correct_overall_predictions, token_accuracy,
-            correct_rowwise_predictions, rowwise_accuracy, edit_distance_val,
-            mean_edit_distance, perplexity_val
-        ) = self.sequence_measures(
-            targets,
-            targets_sequence_length,
-            last_targets,
-            predictions_sequence,
-            predictions_sequence_length,
-            last_predictions,
-            eval_loss
-        )
-
-        output_tensors[
-            CORRECT_LAST_PREDICTIONS + '_' + feature_name
-            ] = correct_last_predictions
-        output_tensors[LAST_ACCURACY + '_' + feature_name] = last_accuracy
-        output_tensors[
-            CORRECT_OVERALL_PREDICTIONS + '_' + feature_name
-            ] = correct_overall_predictions
-        output_tensors[TOKEN_ACCURACY + '_' + feature_name] = token_accuracy
-        output_tensors[
-            CORRECT_ROWWISE_PREDICTIONS + '_' + feature_name
-            ] = correct_rowwise_predictions
-        output_tensors[ROWWISE_ACCURACY + '_' + feature_name] = rowwise_accuracy
-        output_tensors[EDIT_DISTANCE + '_' + feature_name] = edit_distance_val
-        output_tensors[PERPLEXITY + '_' + feature_name] = perplexity_val
-
-        if 'sampled' not in self.loss['type']:
-            tf.compat.v1.summary.scalar(
-                'batch_train_last_accuracy_{}'.format(feature_name),
-                last_accuracy
+    def _setup_loss(self):
+        if self.loss[TYPE] == 'softmax_cross_entropy':
+            self.train_loss_function = SequenceLoss()
+        elif self.loss[TYPE] == 'sampled_softmax_cross_entropy':
+            self.train_loss_function = SampledSoftmaxCrossEntropyLoss(
+                decoder_obj=self.decoder_obj,
+                num_classes=self.num_classes,
+                feature_loss=self.loss,
+                name='train_loss'
             )
-            tf.compat.v1.summary.scalar(
-                'batch_train_token_accuracy_{}'.format(feature_name),
-                token_accuracy
-            )
-            tf.compat.v1.summary.scalar(
-                'batch_train_rowwise_accuracy_{}'.format(feature_name),
-                rowwise_accuracy
-            )
-            tf.compat.v1.summary.scalar(
-                'batch_train_mean_edit_distance_{}'.format(feature_name),
-                mean_edit_distance
+        else:
+            raise ValueError(
+                "Loss type {} is not supported. Valid values are "
+                "'softmax_cross_entropy' or "
+                "'sampled_softmax_cross_entropy'".format(self.loss[TYPE])
             )
 
-        return train_mean_loss, eval_loss, output_tensors
+        self.eval_loss_function = SequenceLossMetric()
 
-    def sequence_predictions(
-            self,
-            targets,
-            decoder,
-            hidden,
-            hidden_size,
-            regularizer=None,
-            is_timeseries=False
-    ):
-        with tf.compat.v1.variable_scope('predictions_{}'.format(self.name)):
-            decoder_output = decoder(
-                dict(self.__dict__),
-                targets,
-                hidden,
-                hidden_size,
-                regularizer,
-                is_timeseries=is_timeseries
-            )
-            if self.decoder == 'generator':
-                additional = 1  # because of eos symbol
-            elif self.decoder == 'tagger':
-                additional = 0
+    def _setup_metrics(self):
+        self.metric_functions[LOSS] = self.eval_loss_function
+        self.metric_functions[TOKEN_ACCURACY] = TokenAccuracyMetric()
+        self.metric_functions[LAST_ACCURACY] = SequenceLastAccuracyMetric()
+        self.metric_functions[PERPLEXITY] = PerplexityMetric()
+        self.metric_functions[EDIT_DISTANCE] = EditDistanceMetric()
+
+    # overrides super class OutputFeature.update_metrics() method
+    def update_metrics(self, targets, predictions):
+        for metric, metric_fn in self.metric_functions.items():
+            if metric == LOSS or metric == PERPLEXITY:
+                metric_fn.update_state(targets, predictions)
+            elif metric == LAST_ACCURACY:
+                metric_fn.update_state(targets, predictions[LAST_PREDICTIONS])
             else:
-                additional = 0
+                metric_fn.update_state(targets, predictions[PREDICTIONS])
 
-            (
-                predictions_sequence, predictions_sequence_scores,
-                predictions_sequence_length, probabilities_sequence,
-                targets_sequence_length, eval_logits, train_logits,
-                class_weights, class_biases
-            ) = decoder_output
-
-            last_predictions = tf.gather_nd(
-                predictions_sequence,
-                tf.stack(
-                    [tf.range(tf.shape(predictions_sequence)[0]),
-                     tf.maximum(
-                         predictions_sequence_length - 1 - additional,
-                         0
-                     )],
-                    axis=1
-                )
-            )
-
-            last_targets = tf.gather_nd(
-                targets,
-                tf.stack(
-                    [tf.range(tf.shape(predictions_sequence)[0]),
-                     tf.maximum(targets_sequence_length - 1 - additional, 0)],
-                    axis=1
-                )
-            )
-
-        return (
-            predictions_sequence,
-            predictions_sequence_scores,
-            predictions_sequence_length,
-            last_predictions,
-            probabilities_sequence,
-            targets_sequence_length,
-            last_targets,
-            eval_logits,
-            train_logits,
-            class_weights,
-            class_biases
-        )
-
-    def sequence_measures(
+    def logits(
             self,
-            targets,
-            targets_sequence_length,
-            last_targets,
-            predictions_sequence,
-            predictions_sequence_length,
-            last_predictions,
-            eval_loss
+            inputs,
+            target=None,
+            training=None
     ):
-        with tf.compat.v1.variable_scope('measures_{}'.format(self.name)):
-            (
-                token_accuracy_val,
-                overall_correct_predictions,
-                rowwise_accuracy_val,
-                rowwise_correct_predictions
-            ) = masked_accuracy(
-                targets,
-                predictions_sequence,
-                targets_sequence_length,
-                self.name
+        if training:
+            return self.decoder_obj._logits_training(
+                inputs,
+                target=tf.cast(target, dtype=tf.int32),
+                training=training
             )
-            last_accuracy_val, correct_last_predictions = accuracy(
-                last_targets,
-                last_predictions,
-                self.name
-            )
-            edit_distance_val, mean_edit_distance = edit_distance(
-                targets,
-                targets_sequence_length,
-                predictions_sequence,
-                predictions_sequence_length,
-                self.name
-            )
-            perplexity_val = perplexity(eval_loss)
+        else:
+            return inputs
 
-        return (
-            correct_last_predictions,
-            last_accuracy_val,
-            overall_correct_predictions,
-            token_accuracy_val,
-            rowwise_correct_predictions,
-            rowwise_accuracy_val,
-            edit_distance_val,
-            mean_edit_distance,
-            perplexity_val
-        )
+    def predictions(self, inputs, training=None):
+        # Generator Decoder
+        return self.decoder_obj._predictions_eval(inputs, training=training)
 
-    def sequence_loss(
-            self,
-            targets,
-            targets_sequence_length,
-            eval_logits,
-            train_logits,
-            weights,
-            biases
-    ):
-        # This is needed because in the case of the generator decoder the
-        # first padding element is also the EOS symbol and we want to count
-        # the EOS symbol for the loss otherwise the model has no incentive
-        # to end the sequence.
-        if self.decoder == 'generator':
-            targets_sequence_length = tf.minimum(
-                targets_sequence_length + 1,
-                tf.shape(targets)[1]
-            )
-        loss = self.loss
-        with tf.compat.v1.variable_scope('loss_{}'.format(self.name)):
-            if loss['type'] == 'softmax_cross_entropy':
-                train_loss = seq2seq_sequence_loss(
-                    targets,
-                    targets_sequence_length,
-                    eval_logits
-                )
-                train_mean_loss = tf.reduce_mean(
-                    train_loss,
-                    name='mean_loss_{}'.format(self.name)
-                )
-                eval_loss = train_loss
+    def get_output_dtype(self):
+        return tf.int32
 
-            elif loss['type'] == 'sampled_softmax_cross_entropy':
-                train_loss, eval_loss = sequence_sampled_softmax_cross_entropy(
-                    targets,
-                    targets_sequence_length,
-                    eval_logits,
-                    train_logits,
-                    weights,
-                    biases,
-                    loss,
-                    self.num_classes
-                )
-
-                train_mean_loss = tf.reduce_mean(
-                    train_loss,
-                    name='mean_loss_{}'.format(self.name)
-                )
-            else:
-                train_mean_loss = None
-                eval_loss = None
-                raise ValueError(
-                    'Unsupported loss type {}'.format(loss['type'])
-                )
-        return train_mean_loss, eval_loss
-
-    default_validation_measure = LOSS
-
-    output_config = OrderedDict([
-        (LOSS, {
-            'output': EVAL_LOSS,
-            'aggregation': SUM,
-            'value': 0,
-            'type': MEASURE
-        }),
-        (ACCURACY, {
-            'output': CORRECT_ROWWISE_PREDICTIONS,
-            'aggregation': SUM,
-            'value': 0,
-            'type': MEASURE
-        }),
-        (TOKEN_ACCURACY, {
-            'output': CORRECT_OVERALL_PREDICTIONS,
-            'aggregation': SEQ_SUM,
-            'value': 0,
-            'type': MEASURE
-        }),
-        (LAST_ACCURACY, {
-            'output': CORRECT_LAST_PREDICTIONS,
-            'aggregation': SUM,
-            'value': 0,
-            'type': MEASURE
-        }),
-        (PERPLEXITY, {
-            'output': PERPLEXITY,
-            'aggregation': AVG_EXP,
-            'value': 0,
-            'type': MEASURE
-        }),
-        (EDIT_DISTANCE, {
-            'output': EDIT_DISTANCE,
-            'aggregation': SUM,
-            'value': 0,
-            'type': MEASURE
-        }),
-        (LAST_PREDICTIONS, {
-            'output': LAST_PREDICTIONS,
-            'aggregation': APPEND,
-            'value': [],
-            'type': PREDICTION
-        }),
-        (PREDICTIONS, {
-            'output': PREDICTIONS,
-            'aggregation': APPEND,
-            'value': [],
-            'type': PREDICTION
-        }),
-        (PROBABILITIES, {
-            'output': PROBABILITIES,
-            'aggregation': APPEND,
-            'value': [],
-            'type': PREDICTION
-        }),
-        (LENGTHS, {
-            'output': LENGTHS,
-            'aggregation': APPEND,
-            'value': [],
-            'type': PREDICTION
-        })
-    ])
+    def get_output_shape(self):
+        return self.max_sequence_length,
 
     @staticmethod
     def update_model_definition_with_metadata(
@@ -705,7 +358,7 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
                     'for feature {}'.format(output_feature['name'])
                 )
 
-        if output_feature[LOSS]['type'] == 'sampled_softmax_cross_entropy':
+        if output_feature[LOSS][TYPE] == 'sampled_softmax_cross_entropy':
             output_feature[LOSS]['class_counts'] = [
                 feature_metadata['str2freq'][cls]
                 for cls in feature_metadata['idx2str']
@@ -741,17 +394,23 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
             skip_save_unprocessed_output=False,
     ):
         postprocessed = {}
-        npy_filename = os.path.join(experiment_dir_name, '{}_{}.npy')
         name = output_feature['name']
+
+        npy_filename = None
+        if is_on_master():
+            npy_filename = os.path.join(experiment_dir_name, '{}_{}.npy')
+        else:
+            skip_save_unprocessed_output = True
 
         if PREDICTIONS in result and len(result[PREDICTIONS]) > 0:
             preds = result[PREDICTIONS]
+            lengths = result[LENGTHS]
             if 'idx2str' in metadata:
                 postprocessed[PREDICTIONS] = [
                     [metadata['idx2str'][token]
                      if token < len(metadata['idx2str']) else UNKNOWN_SYMBOL
-                     for token in pred]
-                    for pred in preds
+                     for token in [pred[i] for i in range(length)]]
+                    for pred, length in [(preds[j], lengths[j]) for j in range(len(preds))]
                 ]
             else:
                 postprocessed[PREDICTIONS] = preds
@@ -773,12 +432,13 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
                 postprocessed[LAST_PREDICTIONS] = last_preds
 
             if not skip_save_unprocessed_output:
-                np.save(npy_filename.format(name, LAST_PREDICTIONS), last_preds)
+                np.save(npy_filename.format(name, LAST_PREDICTIONS),
+                        last_preds)
 
             del result[LAST_PREDICTIONS]
 
         if PROBABILITIES in result and len(result[PROBABILITIES]) > 0:
-            probs = result[PROBABILITIES]
+            probs = result[PROBABILITIES].numpy()
             if probs is not None:
 
                 if len(probs) > 0 and isinstance(probs[0], list):
@@ -829,7 +489,8 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
                 'weight': 1
             }
         )
-        set_default_value(output_feature[LOSS], 'type', 'softmax_cross_entropy')
+        set_default_value(output_feature[LOSS], 'type',
+                          'softmax_cross_entropy')
         set_default_value(output_feature[LOSS], 'labels_smoothing', 0)
         set_default_value(output_feature[LOSS], 'class_weights', 1)
         set_default_value(output_feature[LOSS], 'robust_lambda', 0)
@@ -838,7 +499,7 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
                           'class_similarities_temperature', 0)
         set_default_value(output_feature[LOSS], 'weight', 1)
 
-        if output_feature[LOSS]['type'] == 'sampled_softmax_cross_entropy':
+        if output_feature[LOSS][TYPE] == 'sampled_softmax_cross_entropy':
             set_default_value(output_feature[LOSS], 'sampler', 'log_uniform')
             set_default_value(output_feature[LOSS], 'negative_samples', 25)
             set_default_value(output_feature[LOSS], 'distortion', 0.75)
@@ -858,23 +519,7 @@ class SequenceOutputFeature(SequenceBaseFeature, OutputFeature):
         set_default_value(output_feature, 'reduce_input', SUM)
         set_default_value(output_feature, 'reduce_dependencies', SUM)
 
-
-sequence_encoder_registry = {
-    'stacked_cnn': StackedCNN,
-    'parallel_cnn': ParallelCNN,
-    'stacked_parallel_cnn': StackedParallelCNN,
-    'rnn': RNN,
-    'cnnrnn': CNNRNN,
-    'embed': EmbedEncoder,
-    'bert': BERT,
-    'passthrough': PassthroughEncoder,
-    'null': PassthroughEncoder,
-    'none': PassthroughEncoder,
-    'None': PassthroughEncoder,
-    None: PassthroughEncoder
-}
-
-sequence_decoder_registry = {
-    'generator': Generator,
-    'tagger': Tagger
-}
+    decoder_registry = {
+        'generator': SequenceGeneratorDecoder,
+        'tagger': SequenceTaggerDecoder
+    }

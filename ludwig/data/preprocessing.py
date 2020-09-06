@@ -27,8 +27,9 @@ from ludwig.constants import TEXT
 from ludwig.data.concatenate_datasets import concatenate_csv
 from ludwig.data.concatenate_datasets import concatenate_df
 from ludwig.data.dataset import Dataset
-from ludwig.features.feature_registries import base_type_registry
-from ludwig.globals import MODEL_HYPERPARAMETERS_FILE_NAME
+from ludwig.features.feature_registries import base_type_registry, \
+    input_type_registry
+from ludwig.globals import MODEL_HYPERPARAMETERS_FILE_NAME, is_on_master
 from ludwig.utils import data_utils
 from ludwig.utils.data_utils import collapse_rare_labels, csv_contains_column
 from ludwig.utils.data_utils import file_exists_with_diff_extension
@@ -40,9 +41,9 @@ from ludwig.utils.data_utils import text_feature_data_field
 from ludwig.utils.defaults import default_preprocessing_parameters, \
     merge_with_defaults
 from ludwig.utils.defaults import default_random_seed
-from ludwig.utils.misc import get_from_registry
-from ludwig.utils.misc import merge_dict
-from ludwig.utils.misc import set_random_seed
+from ludwig.utils.misc_utils import get_from_registry, resolve_pointers
+from ludwig.utils.misc_utils import merge_dict
+from ludwig.utils.misc_utils import set_random_seed
 
 logger = logging.getLogger(__name__)
 
@@ -112,28 +113,54 @@ def build_dataset_df(
 def build_metadata(dataset_df, features, global_preprocessing_parameters):
     train_set_metadata = {}
     for feature in features:
-        get_feature_meta = get_from_registry(
-            feature['type'],
-            base_type_registry
-        ).get_feature_meta
         if 'preprocessing' in feature:
             preprocessing_parameters = merge_dict(
-                global_preprocessing_parameters[feature['type']],
+                global_preprocessing_parameters[feature[TYPE]],
                 feature['preprocessing']
             )
         else:
             preprocessing_parameters = global_preprocessing_parameters[
-                feature['type']
+                feature[TYPE]
             ]
+
+        # deal with encoders that have fixed preprocessing
+        if 'encoder' in feature:
+            encoders_registry = get_from_registry(
+                feature[TYPE],
+                input_type_registry
+            ).encoder_registry
+            encoder_class = encoders_registry[feature['encoder']]
+            if hasattr(encoder_class, 'fixed_preprocessing_parameters'):
+                encoder_fpp = encoder_class.fixed_preprocessing_parameters
+                
+                if 'preprocessing' in feature:
+                    all_feature_params = merge_dict(
+                        feature,
+                        feature['preprocessing']
+                    )
+                else:
+                    all_feature_params = feature
+
+                preprocessing_parameters = merge_dict(
+                    preprocessing_parameters,
+                    resolve_pointers(encoder_fpp, all_feature_params, 'feature.')
+                )
+
         handle_missing_values(
             dataset_df,
             feature,
             preprocessing_parameters
         )
+
+        get_feature_meta = get_from_registry(
+            feature[TYPE],
+            base_type_registry
+        ).get_feature_meta
         train_set_metadata[feature['name']] = get_feature_meta(
             dataset_df[feature['name']].astype(str),
             preprocessing_parameters
         )
+
     return train_set_metadata
 
 
@@ -145,29 +172,57 @@ def build_data(
 ):
     data_dict = {}
     for feature in features:
-        add_feature_data = get_from_registry(
-            feature['type'],
-            base_type_registry
-        ).add_feature_data
         if 'preprocessing' in feature:
             preprocessing_parameters = merge_dict(
-                global_preprocessing_parameters[feature['type']],
+                global_preprocessing_parameters[feature[TYPE]],
                 feature['preprocessing']
             )
         else:
             preprocessing_parameters = global_preprocessing_parameters[
-                feature['type']
+                feature[TYPE]
             ]
+
+        # deal with encoders that have fixed preprocessing
+        if 'encoder' in feature:
+            encoders_registry = get_from_registry(
+                feature[TYPE],
+                input_type_registry
+            ).encoder_registry
+
+            encoder_class = encoders_registry[feature['encoder']]
+            if hasattr(encoder_class, 'fixed_preprocessing_parameters'):
+                encoder_fpp = encoder_class.fixed_preprocessing_parameters
+
+                if 'preprocessing' in feature:
+                    all_feature_params = merge_dict(
+                        feature,
+                        feature['preprocessing']
+                    )
+                else:
+                    all_feature_params = feature
+
+                preprocessing_parameters = merge_dict(
+                    preprocessing_parameters,
+                    resolve_pointers(encoder_fpp, all_feature_params, 'feature.')
+                )
+                
         handle_missing_values(
             dataset_df,
             feature,
             preprocessing_parameters
         )
+
         if feature['name'] not in train_set_metadata:
             train_set_metadata[feature['name']] = {}
+
         train_set_metadata[
             feature['name']
         ]['preprocessing'] = preprocessing_parameters
+
+        add_feature_data = get_from_registry(
+            feature[TYPE],
+            base_type_registry
+        ).add_feature_data
         add_feature_data(
             feature,
             dataset_df,
@@ -175,6 +230,7 @@ def build_data(
             train_set_metadata,
             preprocessing_parameters
         )
+
     return data_dict
 
 
@@ -190,7 +246,7 @@ def handle_missing_values(dataset_df, feature, preprocessing_parameters):
             dataset_df[feature['name']].value_counts().index[0],
         )
     elif missing_value_strategy == FILL_WITH_MEAN:
-        if feature['type'] != NUMERICAL:
+        if feature[TYPE] != NUMERICAL:
             raise ValueError(
                 'Filling missing values with mean is supported '
                 'only for numerical types',
@@ -202,6 +258,8 @@ def handle_missing_values(dataset_df, feature, preprocessing_parameters):
         dataset_df[feature['name']] = dataset_df[feature['name']].fillna(
             method=missing_value_strategy,
         )
+    elif missing_value_strategy == DROP_ROW:
+        dataset_df.dropna(subset=[feature['name']], inplace=True)
     else:
         raise ValueError('Invalid missing value strategy')
 
@@ -250,7 +308,7 @@ def load_data(
     hdf5_data = h5py.File(hdf5_file_path, 'r')
     dataset = {}
     for input_feature in input_features:
-        if input_feature['type'] == TEXT:
+        if input_feature[TYPE] == TEXT:
             text_data_field = text_feature_data_field(input_feature)
             dataset[text_data_field] = hdf5_data[text_data_field][()]
         else:
@@ -258,7 +316,7 @@ def load_data(
                 input_feature['name']
             ][()]
     for output_feature in output_features:
-        if output_feature['type'] == TEXT:
+        if output_feature[TYPE] == TEXT:
             dataset[text_feature_data_field(output_feature)] = hdf5_data[
                 text_feature_data_field(output_feature)
             ][()]
@@ -618,7 +676,7 @@ def _preprocess_csv_for_training(
             train_set_metadata=train_set_metadata,
             random_seed=random_seed
         )
-        if not skip_save_processed_input:
+        if is_on_master() and not skip_save_processed_input:
             logger.info('Writing dataset')
             data_hdf5_fp = replace_file_extension(data_csv, 'hdf5')
             data_utils.save_hdf5(data_hdf5_fp, data, train_set_metadata)
@@ -663,7 +721,7 @@ def _preprocess_csv_for_training(
             data,
             data[SPLIT]
         )
-        if not skip_save_processed_input:
+        if is_on_master() and not skip_save_processed_input:
             logger.info('Writing dataset')
             data_train_hdf5_fp = replace_file_extension(data_train_csv, 'hdf5')
             data_utils.save_hdf5(
@@ -884,7 +942,7 @@ def preprocess_for_prediction(
 
 def replace_text_feature_level(features, datasets):
     for feature in features:
-        if feature['type'] == TEXT:
+        if feature[TYPE] == TEXT:
             for dataset in datasets:
                 if dataset is not None:
                     dataset[feature['name']] = dataset[
@@ -919,15 +977,15 @@ def get_preprocessing_params(model_definition):
     for feature in features:
         if 'preprocessing' in feature:
             local_preprocessing_parameters = merge_dict(
-                global_preprocessing_parameters[feature['type']],
+                global_preprocessing_parameters[feature[TYPE]],
                 feature['preprocessing']
             )
         else:
             local_preprocessing_parameters = global_preprocessing_parameters[
-                feature['type']
+                feature[TYPE]
             ]
         merged_preprocessing_params.append(
-            (feature['name'], feature['type'], local_preprocessing_parameters)
+            (feature['name'], feature[TYPE], local_preprocessing_parameters)
         )
 
     return merged_preprocessing_params

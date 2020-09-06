@@ -1,5 +1,16 @@
 ![Ludwig logo](https://github.com/ludwig-ai/ludwig-docs/raw/master/docs/images/ludwig_hero.png "Ludwig logo")
 
+<div align="center">
+
+[![PyPI version](https://badge.fury.io/py/ludwig.svg)](https://badge.fury.io/py/ludwig)
+[![Downloads](https://pepy.tech/badge/ludwig)](https://pepy.tech/project/ludwig)
+[![Build Status](https://travis-ci.com/uber/ludwig.svg?branch=master)](https://travis-ci.com/github/uber/ludwig)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/uber/ludwig/blob/master/LICENSE)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fuber%2Fludwig.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fuber%2Fludwig?ref=badge_shield)
+[![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/4210/badge)](https://bestpractices.coreinfrastructure.org/projects/4210)
+
+</div>
+
 Ludwig is a toolbox built on top of TensorFlow that allows users to train and test deep learning models without the need to write code.
 
 All you need to provide is a CSV file containing your data, a list of columns to use as inputs, and a list of columns to use as outputs, Ludwig will do the rest.
@@ -105,13 +116,15 @@ Model serving extra packages can be installed with `pip install ludwig[serve]` a
 - pydantic
 - python-multipart
 
+Distributed training is supported with [Horovod](https://github.com/horovod/horovod), support for
+which can be installed with `pip install ludwig[horovod]` or `HOROVOD_GPU_OPERATIONS=NCCL pip install ludwig[horovod]`
+for GPU support.  See Horovod's [installation guide](https://horovod.readthedocs.io/en/stable/install_include.html) 
+for full details on available installation options.
+
 Any combination of extra packages can be installed at the same time with `pip install ludwig[extra1,extra2,...]` like for instance `pip install ludwig[text,viz]`.
 The full set of dependencies can be installed with `pip install ludwig[full]`.
 
 Beware that the `tensorflow` package contained in the `requirements.txt` file is the CPU version. If you prefer to install the GPU version, uninstall `tensorflow` and replace it with `tensorflow=gpu` after having installed `ludwig`, being careful at matching the version ludwig requires, as shown in `requirements.txt`.
-
-If you want to train Ludwig models in a distributed way, you need to also install the `horovod` and the `mpi4py` packages.
-Please follow the instructions on [Horovod's repository](https://github.com/uber/horovod) to install it.
 
 
 Basic Principles
@@ -199,7 +212,7 @@ Several visualizations are available, please refer to [Visualizations](https://l
 Distributed Training
 --------------------
 
-You can distribute the training of your models using [Horovod](https://github.com/uber/horovod), which allows training on a single machine with multiple GPUs as well as on multiple machines with multiple GPUs.
+You can distribute the training of your models using [Horovod](https://github.com/horovod/horovod), which allows training on a single machine with multiple GPUs as well as on multiple machines with multiple GPUs.
 Refer to the [User Guide](https://ludwig-ai.github.io/ludwig-docs/user_guide/#distributed-training) for more details.
 
 
@@ -219,7 +232,7 @@ Those can be visualized by the `visualize` tool, which can also be used to compa
 ludwig visualize --visualization compare_performance --test_statistics path/to/test_statistics_model_1.json path/to/test_statistics_model_2.json
 ```
 
-will return a bar plot comparing the models on different measures:
+will return a bar plot comparing the models on different metrics:
 
 ![Performance Comparison](https://github.com/ludwig-ai/ludwig-docs/raw/master/docs/images/compare_performance.png "Performance Comparison")
 
@@ -267,3 +280,7 @@ Full documentation
 ------------------
 
 You can find the full documentation [here](https://ludwig-ai.github.io/ludwig-docs).
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fuber%2Fludwig.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fuber%2Fludwig?ref=badge_large)

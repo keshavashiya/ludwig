@@ -2,17 +2,15 @@ import argparse
 import logging
 import os
 import shutil
-import sys
 
 import numpy as np
 
 from ludwig import __file__ as ludwig_path
 from ludwig.api import LudwigModel
 from ludwig.constants import CATEGORY, NUMERICAL, BINARY, SEQUENCE, TEXT, SET, \
-    VECTOR
+    VECTOR, PREDICTIONS, PROBABILITIES, PROBABILITY
 from ludwig.globals import MODEL_HYPERPARAMETERS_FILE_NAME, \
-    TRAIN_SET_METADATA_FILE_NAME, MODEL_WEIGHTS_FILE_NAME, LUDWIG_VERSION, \
-    MODEL_WEIGHTS_PROGRESS_FILE_NAME
+    TRAIN_SET_METADATA_FILE_NAME, MODEL_WEIGHTS_FILE_NAME, LUDWIG_VERSION
 from ludwig.utils.data_utils import load_json
 from ludwig.utils.print_utils import logging_level_registry, print_ludwig
 
@@ -24,7 +22,6 @@ class LudwigNeuropodModelWrapper:
         self.ludwig_model = LudwigModel.load(data_root)
 
     def __call__(self, **kwargs):
-        print('__call__', file=sys.stderr)
         data_dict = kwargs
         for key in data_dict:
             data_dict[key] = np.squeeze(data_dict[key], axis=1)
@@ -38,7 +35,6 @@ class LudwigNeuropodModelWrapper:
 
 
 def get_model(data_root):
-    print('get_model()', data_root, file=sys.stderr)
     return LudwigNeuropodModelWrapper(data_root)
 
 
@@ -50,24 +46,30 @@ def postprocess_for_neuropod(predicted, model_definition):
         if feature_type == BINARY:
             postprocessed[feature_name + "_predictions"] = \
                 np.expand_dims(
-                    predicted[feature_name]['predictions'].astype('str'), 1)
+                    predicted[feature_name][PREDICTIONS].astype('str'), 1)
             postprocessed[feature_name + "_probabilities"] = \
-                np.expand_dims(predicted[feature_name]['probabilities'], 1)
+                np.expand_dims(
+                    predicted[feature_name][PROBABILITIES].astype('float64'),
+                    1)
         elif feature_type == NUMERICAL:
             postprocessed[feature_name + "_predictions"] = \
-                np.expand_dims(predicted[feature_name]['predictions'], 1)
+                np.expand_dims(
+                    predicted[feature_name][PREDICTIONS].astype('float64'),
+                    1)
         elif feature_type == CATEGORY:
             postprocessed[feature_name + "_predictions"] = np.expand_dims(
-                np.array(predicted[feature_name]['predictions'], dtype='str'), 1
+                np.array(predicted[feature_name][PREDICTIONS], dtype='str'), 1
             )
             postprocessed[feature_name + "_probability"] = \
-                np.expand_dims(predicted[feature_name]['probability'], 1)
+                np.expand_dims(
+                    predicted[feature_name][PROBABILITY].astype('float64'),
+                    1)
             postprocessed[feature_name + "_probabilities"] = \
-                predicted[feature_name]['probabilities']
+                predicted[feature_name][PROBABILITIES].astype('float64')
         elif feature_type == SEQUENCE:
             predictions = list(map(
                 lambda x: ' '.join(x),
-                predicted[feature_name]['predictions']
+                predicted[feature_name][PREDICTIONS]
             ))
             postprocessed[feature_name + "_predictions"] = np.expand_dims(
                 np.array(predictions, dtype='str'), 1
@@ -75,7 +77,7 @@ def postprocess_for_neuropod(predicted, model_definition):
         elif feature_type == TEXT:
             predictions = list(map(
                 lambda x: ' '.join(x),
-                predicted[feature_name]['predictions']
+                predicted[feature_name][PREDICTIONS]
             ))
             postprocessed[feature_name + "_predictions"] = np.expand_dims(
                 np.array(predictions, dtype='str'), 1
@@ -83,7 +85,7 @@ def postprocess_for_neuropod(predicted, model_definition):
         elif feature_type == SET:
             predictions = list(map(
                 lambda x: ' '.join(x),
-                predicted[feature_name]['predictions']
+                predicted[feature_name][PREDICTIONS]
             ))
             postprocessed[feature_name + "_predictions"] = np.expand_dims(
                 np.array(predictions, dtype='str'), 1
@@ -96,15 +98,15 @@ def postprocess_for_neuropod(predicted, model_definition):
                 np.array(probability, dtype='str'), 1
             )
             postprocessed[feature_name + "_probabilities"] = \
-                predicted[feature_name]['probabilities']
+                predicted[feature_name][PROBABILITIES].astype('float64')
         elif feature_type == VECTOR:
             postprocessed[feature_name + "_predictions"] = \
-                predicted[feature_name]['predictions']
+                predicted[feature_name][PREDICTIONS].astype('float64')
         else:
             postprocessed[feature_name + "_predictions"] = np.expand_dims(
-                np.array(predicted[feature_name]['predictions'], dtype='str'), 1
+                np.array(predicted[feature_name][PREDICTIONS], dtype='str'), 1
             )
-
+    # print(postprocessed, file=sys.stderr)
     return postprocessed
 
 
@@ -112,15 +114,13 @@ def export_neuropod(
         ludwig_model_path,
         neuropod_path,
         neuropod_model_name="ludwig_model",
-        package_as_dir=False
 ):
     try:
         from neuropod.backends.python.packager import create_python_neuropod
     except ImportError:
-        logger.error(
+        raise RuntimeError(
             'The "neuropod" package is not installed in your environment.'
         )
-        sys.exit(-1)
 
     data_paths = [
         {
@@ -143,8 +143,7 @@ def export_neuropod(
         },
     ]
     for filename in os.listdir(ludwig_model_path):
-        if (MODEL_WEIGHTS_FILE_NAME in filename
-                and MODEL_WEIGHTS_PROGRESS_FILE_NAME not in filename):
+        if MODEL_WEIGHTS_FILE_NAME in filename:
             data_paths.append(
                 {
                     "path": os.path.join(
@@ -190,13 +189,13 @@ def export_neuropod(
             })
             output_spec.append({
                 "name": feature['name'] + '_probabilities',
-                "dtype": "float32",
+                "dtype": "float64",
                 "shape": (None, 1)
             })
         elif feature_type == NUMERICAL:
             output_spec.append({
                 "name": feature['name'] + '_predictions',
-                "dtype": "float32",
+                "dtype": "float64",
                 "shape": (None, 1)
             })
         elif feature_type == CATEGORY:
@@ -207,12 +206,12 @@ def export_neuropod(
             })
             output_spec.append({
                 "name": feature['name'] + '_probability',
-                "dtype": "float32",
+                "dtype": "float64",
                 "shape": (None, 1)
             })
             output_spec.append({
                 "name": feature['name'] + '_probabilities',
-                "dtype": "float32",
+                "dtype": "float64",
                 "shape": (
                     None, training_set_metadata[feature_name]['vocab_size']
                 )
@@ -242,7 +241,7 @@ def export_neuropod(
             })
             output_spec.append({
                 "name": feature['name'] + '_probabilities',
-                "dtype": "float32",
+                "dtype": "float64",
                 "shape": (
                     None, training_set_metadata[feature_name]['vocab_size']
                 )
@@ -250,7 +249,7 @@ def export_neuropod(
         elif feature_type == VECTOR:
             output_spec.append({
                 "name": feature['name'] + '_predictions',
-                "dtype": "float32",
+                "dtype": "float64",
                 "shape": (
                     None, training_set_metadata[feature_name]['vector_size']
                 )
@@ -287,8 +286,6 @@ def export_neuropod(
         }],
         entrypoint_package="ludwig.utils.neuropod_utils",
         entrypoint="get_model",
-        # test_deps=['torch', 'numpy'],
-        package_as_zip=not package_as_dir,
         skip_virtualenv=True,
         input_spec=input_spec,
         output_spec=output_spec
@@ -334,14 +331,6 @@ def cli():
         help='path of the output Neuropod package file',
         default='ludwig_model'
     )
-    parser.add_argument(
-        '-d',
-        '--package_as_dir',
-        help='output the Neuropod package a directory '
-             '(by default it is a zip file)',
-        action='store_true',
-        default=False
-    )
 
     args = parser.parse_args()
 
@@ -357,10 +346,8 @@ def cli():
         args.ludwig_model_path,
         args.neuropod_path,
         args.neuropod_model_name,
-        args.package_as_dir
     )
 
 
 if __name__ == '__main__':
-    # contrib_command("neuropod", *sys.argv)
     cli()

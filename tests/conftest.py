@@ -20,6 +20,27 @@ import uuid
 import pytest
 
 from ludwig.utils.data_utils import replace_file_extension
+from ludwig.utils.tf_utils import initialize_tensorflow
+
+
+@pytest.fixture(scope="session", autouse=True)
+def init_tensorflow_cpu(request):
+    """Initialize tensorflow at the start of testing to only use CPUs.
+
+    This fixture runs once before any tests, and ensures that the main process
+    running the pytests does not claim any GPU resources.
+
+    This is critical to avoid OOM errors when running subprocesses that need GPUs (e.g., hyperopt),
+    as otherwise the main process will consume all the memory and cause the subprocesses to crash.
+
+    Run most tests eagerly as the cost of graph construction can easily increase runtime by
+    and order of magnitude for small tests. Tests that execute in subprocesses, and tests
+    in `test_graph_execution.py` still run in graph mode.
+    """
+    import tensorflow as tf
+    tf.config.experimental_run_functions_eagerly(True)
+    initialize_tensorflow(gpus=-1)
+
 
 @pytest.fixture()
 def csv_filename():
@@ -32,6 +53,7 @@ def csv_filename():
     yield csv_filename
 
     delete_temporary_data(csv_filename)
+
 
 @pytest.fixture()
 def yaml_filename():

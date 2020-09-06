@@ -25,7 +25,7 @@ import sys
 import tempfile
 
 from ludwig.api import LudwigModel
-from ludwig.contrib import contrib_command
+from ludwig.contrib import contrib_command, contrib_import
 from ludwig.globals import LUDWIG_VERSION
 from ludwig.utils.print_utils import logging_level_registry, print_ludwig
 
@@ -37,9 +37,11 @@ try:
     from starlette.datastructures import UploadFile
     from starlette.requests import Request
     from starlette.responses import JSONResponse
-except ImportError:
+except ImportError as e:
+    logger.error(e)
     logger.error(
-        ' fastapi and other serving dependencies are not installed. '
+        ' fastapi and other serving dependencies cannot be loaded'
+        'and may have not been installed. '
         'In order to install all serving dependencies run '
         'pip install ludwig[serve]'
     )
@@ -170,5 +172,6 @@ def cli(sys_argv):
 
 
 if __name__ == '__main__':
+    contrib_import()
     contrib_command("serve", *sys.argv)
     cli(sys.argv[1:])
