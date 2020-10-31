@@ -21,7 +21,7 @@ import sys
 import numpy as np
 import tensorflow as tf
 
-from ludwig.constants import AUDIO, BACKFILL, TIED, TYPE
+from ludwig.constants import AUDIO, BACKFILL, TIED, TYPE, NAME
 from ludwig.encoders.sequence_encoders import StackedCNN, ParallelCNN, \
     StackedParallelCNN, StackedRNN, SequencePassthroughEncoder, StackedCNNRNN
 from ludwig.features.sequence_feature import SequenceInputFeature
@@ -51,7 +51,7 @@ class AudioFeatureMixin(object):
         'padding_value': 0,
         'norm': None,
         'audio_feature': {
-            'type': 'raw',
+            TYPE: 'raw',
         }
     }
 
@@ -222,7 +222,7 @@ class AudioFeatureMixin(object):
     def add_feature_data(
             feature,
             dataset_df,
-            data,
+            dataset,
             metadata,
             preprocessing_parameters
     ):
@@ -241,22 +241,20 @@ class AudioFeatureMixin(object):
                 'type has to be present in audio_feature dictionary '
                 'for audio.')
 
-        csv_path = None
+        src_path = None
         # this is not super nice, but works both and DFs and lists
         first_path = '.'
-        for first_path in dataset_df[feature['name']]:
+        for first_path in dataset_df[feature[NAME]]:
             break
-        if hasattr(dataset_df, 'csv'):
-            csv_path = os.path.dirname(os.path.abspath(dataset_df.csv))
-        if csv_path is None and not os.path.isabs(first_path):
-            raise ValueError(
-                'Audio file paths must be absolute'
-            )
+        if hasattr(dataset_df, 'src'):
+            src_path = os.path.dirname(os.path.abspath(dataset_df.src))
+        if src_path is None and not os.path.isabs(first_path):
+            raise ValueError('Audio file paths must be absolute')
 
         num_audio_utterances = len(dataset_df)
         padding_value = preprocessing_parameters['padding_value']
         normalization_type = preprocessing_parameters['norm']
-        feature_name = feature['name']
+        feature_name = feature[NAME]
 
         feature_dim = metadata[feature_name]['feature_dim']
         max_length = metadata[feature_name]['max_length']
@@ -279,13 +277,13 @@ class AudioFeatureMixin(object):
         }
 
         if feature['preprocessing']['in_memory']:
-            data[feature['name']] = np.empty(
+            dataset[feature[NAME]] = np.empty(
                 (num_audio_utterances, max_length, feature_dim),
                 dtype=np.float32
             )
-            for i, path in enumerate(dataset_df[feature['name']]):
+            for i, path in enumerate(dataset_df[feature[NAME]]):
                 filepath = get_abs_path(
-                    csv_path,
+                    src_path,
                     path
                 )
                 audio_feature = AudioFeatureMixin._read_audio_and_transform_to_feature(
@@ -293,7 +291,7 @@ class AudioFeatureMixin(object):
                     padding_value, normalization_type, audio_stats
                 )
 
-                data[feature['name']][i, :, :] = audio_feature
+                dataset[feature[NAME]][i, :, :] = audio_feature
 
             audio_stats['std'] = np.sqrt(
                 audio_stats['var'] / float(audio_stats['count']))
@@ -355,11 +353,11 @@ class AudioInputFeature(AudioFeatureMixin, SequenceInputFeature):
         if not self.embedding_size:
             raise ValueError(
                 'embedding_size has to be defined - '
-                'check "update_model_definition_with_metadata()"')
+                'check "update_config_with_metadata()"')
         if not self.max_sequence_length:
             raise ValueError(
                 'max_sequence_length has to be defined - '
-                'check "update_model_definition_with_metadata()"')
+                'check "update_config_with_metadata()"')
 
     def call(self, inputs, training=None, mask=None):
         assert isinstance(inputs, tf.Tensor)
@@ -379,7 +377,7 @@ class AudioInputFeature(AudioFeatureMixin, SequenceInputFeature):
         return self.max_sequence_length, self.embedding_size
 
     @staticmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             input_feature,
             feature_metadata,
             *args,

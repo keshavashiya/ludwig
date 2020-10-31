@@ -6,15 +6,16 @@ from collections import namedtuple
 
 import pytest
 import yaml
-
 from ludwig.api import kfold_cross_validate
-from ludwig.experiment import full_kfold_cross_validate
+from ludwig.experiment import kfold_cross_validate_cli
 from ludwig.utils.data_utils import load_json
+from tests.integration_tests.test_experiment import create_data_set_to_use
 from tests.integration_tests.utils import binary_feature
 from tests.integration_tests.utils import category_feature
 from tests.integration_tests.utils import generate_data
 from tests.integration_tests.utils import numerical_feature
 from tests.integration_tests.utils import sequence_feature
+from tests.integration_tests.utils import text_feature
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -99,12 +100,23 @@ FEATURES_TO_TEST = [
                 reduce_input=None
             )
         ]
-    )
+    ),
+    FeaturesToUse(
+        # input feature
+        [
+            numerical_feature(normalization='zscore'),
+            numerical_feature(normalization='zscore')
+        ],
+        # output feature
+        [
+            text_feature()
+        ]
+    ),
 ]
 
 
 @pytest.mark.parametrize('features_to_use', FEATURES_TO_TEST)
-def test_kfold_cv_cli(features_to_use):
+def test_kfold_cv_cli(features_to_use: FeaturesToUse):
     # k-fold cross validation cli
     num_folds = 3
 
@@ -112,7 +124,7 @@ def test_kfold_cv_cli(features_to_use):
     with tempfile.TemporaryDirectory() as tmpdir:
 
         training_data_fp = os.path.join(tmpdir, 'train.csv')
-        model_definition_fp = os.path.join(tmpdir, 'model_definition.yaml')
+        config_fp = os.path.join(tmpdir, 'config.yaml')
         results_dir = os.path.join(tmpdir, 'results')
         statistics_fp = os.path.join(results_dir,
                                      'kfold_training_statistics.json')
@@ -125,22 +137,22 @@ def test_kfold_cv_cli(features_to_use):
 
         generate_data(input_features, output_features, training_data_fp)
 
-        # generate model definition file
-        model_definition = {
+        # generate config file
+        config = {
             'input_features': input_features,
             'output_features': output_features,
             'combiner': {'type': 'concat', 'fc_size': 14},
             'training': {'epochs': 2}
         }
 
-        with open(model_definition_fp, 'w') as f:
-            yaml.dump(model_definition, f)
+        with open(config_fp, 'w') as f:
+            yaml.dump(config, f)
 
         # run k-fold cv
-        full_kfold_cross_validate(
+        kfold_cross_validate_cli(
             k_fold=num_folds,
-            model_definition_file=model_definition_fp,
-            data_csv=training_data_fp,
+            config_file=config_fp,
+            dataset=training_data_fp,
             output_directory=results_dir,
             logging_level='warn'
         )
@@ -165,7 +177,7 @@ def test_kfold_cv_cli(features_to_use):
 
 
 def test_kfold_cv_api_from_file():
-    # k-fold_cross_validate api with model_definition_file
+    # k-fold_cross_validate api with config_file
     num_folds = 3
 
     # setup temporary directory to run test
@@ -173,7 +185,7 @@ def test_kfold_cv_api_from_file():
 
         # setup required data structures for test
         training_data_fp = os.path.join(tmpdir, 'train.csv')
-        model_definition_fp = os.path.join(tmpdir, 'model_definition.yaml')
+        config_fp = os.path.join(tmpdir, 'config.yaml')
 
         # generate synthetic data for the test
         input_features = [
@@ -187,27 +199,27 @@ def test_kfold_cv_api_from_file():
 
         generate_data(input_features, output_features, training_data_fp)
 
-        # generate model definition file
-        model_definition = {
+        # generate config file
+        config = {
             'input_features': input_features,
             'output_features': output_features,
             'combiner': {'type': 'concat', 'fc_size': 14},
             'training': {'epochs': 2}
         }
 
-        with open(model_definition_fp, 'w') as f:
-            yaml.dump(model_definition, f)
+        with open(config_fp, 'w') as f:
+            yaml.dump(config, f)
 
-        # test kfold_cross_validate api with model definition file
+        # test kfold_cross_validate api with config file
 
         # execute k-fold cross validation run
         (
             kfold_cv_stats,
             kfold_split_indices
-         ) = kfold_cross_validate(
+        ) = kfold_cross_validate(
             3,
-            model_definition_file=model_definition_fp,
-            data_csv=training_data_fp
+            config=config_fp,
+            dataset=training_data_fp
         )
 
         # correct structure for results from kfold cv
@@ -218,8 +230,9 @@ def test_kfold_cv_api_from_file():
         for key in ['fold_' + str(i + 1) for i in range(num_folds)]:
             assert key in kfold_split_indices
 
+
 def test_kfold_cv_api_in_memory():
-    # k-fold_cross_validate api with in-memory model defintion
+    # k-fold_cross_validate api with in-memory config
     num_folds = 3
 
     # setup temporary directory to run test
@@ -240,24 +253,24 @@ def test_kfold_cv_api_in_memory():
 
         generate_data(input_features, output_features, training_data_fp)
 
-        # generate model definition file
-        model_definition = {
+        # generate config file
+        config = {
             'input_features': input_features,
             'output_features': output_features,
             'combiner': {'type': 'concat', 'fc_size': 14},
             'training': {'epochs': 2}
         }
 
-        # test kfold_cross_validate api with model definition in-memory
+        # test kfold_cross_validate api with config in-memory
 
         # execute k-fold cross validation run
         (
             kfold_cv_stats,
             kfold_split_indices
         ) = kfold_cross_validate(
-             3,
-            model_definition=model_definition,
-            data_csv=training_data_fp
+            3,
+            config=config,
+            dataset=training_data_fp
         )
 
         # correct structure for results from kfold cv
@@ -267,3 +280,62 @@ def test_kfold_cv_api_in_memory():
 
         for key in ['fold_' + str(i + 1) for i in range(num_folds)]:
             assert key in kfold_split_indices
+
+
+
+DATA_FORMATS_FOR_KFOLDS = [
+    'csv', 'df', 'dict', 'excel', 'feather', 'fwf', 'html',
+    'json', 'jsonl', 'parquet', 'pickle', 'stata', 'tsv'
+]
+@pytest.mark.parametrize('data_format', DATA_FORMATS_FOR_KFOLDS)
+def test_kfold_cv_dataset_formats(data_format):
+    # k-fold_cross_validate api with in-memory config
+    num_folds = 3
+
+    # setup temporary directory to run test
+    with tempfile.TemporaryDirectory() as tmpdir:
+
+        # setup required data structures for test
+        training_data_fp = os.path.join(tmpdir, 'train.csv')
+
+        # generate synthetic data for the test
+        input_features = [
+            numerical_feature(normalization='zscore'),
+            numerical_feature(normalization='zscore')
+        ]
+
+        output_features = [
+            numerical_feature()
+        ]
+
+        generate_data(input_features, output_features, training_data_fp)
+        dataset_to_use = create_data_set_to_use(data_format, training_data_fp)
+
+        # generate config file
+        config = {
+            'input_features': input_features,
+            'output_features': output_features,
+            'combiner': {'type': 'concat', 'fc_size': 14},
+            'training': {'epochs': 2}
+        }
+
+        # test kfold_cross_validate api with config in-memory
+
+        # execute k-fold cross validation run
+        (
+            kfold_cv_stats,
+            kfold_split_indices
+        ) = kfold_cross_validate(
+            3,
+            config=config,
+            dataset=dataset_to_use
+        )
+
+        # correct structure for results from kfold cv
+        for key in ['fold_' + str(i + 1)
+                    for i in range(num_folds)] + ['overall']:
+            assert key in kfold_cv_stats
+
+        for key in ['fold_' + str(i + 1) for i in range(num_folds)]:
+            assert key in kfold_split_indices
+

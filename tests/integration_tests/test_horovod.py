@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-
 import json
 import os
 import platform
@@ -48,6 +47,8 @@ def _nccl_available():
     try:
         return nccl_built()
     except AttributeError:
+        return False
+    except RuntimeError:
         return False
 
 

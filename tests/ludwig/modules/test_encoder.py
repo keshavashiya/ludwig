@@ -49,7 +49,7 @@ def generate_images(image_size, num_images):
 def _generate_sentence(vocab_size, max_len):
     sentence = np.zeros(max_len, dtype=np.int32)
     random_length = random.randint(1, max_len)
-    sentence[:random_length] = [random.randint(0, vocab_size-1) for _ in
+    sentence[:random_length] = [random.randint(0, vocab_size - 1) for _ in
                                 range(random_length)]
 
     return sentence
@@ -94,7 +94,7 @@ def encoder_test(
     assert hidden.shape.as_list() == output_shape
 
     if output_data is not None:
-        # TODO the hidden output is actually a tensor. May need modification
+        # todo the hidden output is actually a tensor. May need modification
         assert np.allclose(hidden, output_data)
 
 
@@ -220,7 +220,6 @@ def test_sequence_encoder_embed():
 
     for reduce_output, output_shape in zip(reduce_outputs, output_shapes):
         for trainable in [True, False]:
-
             encoder_args['reduce_output'] = reduce_output
             encoder_args['embeddings_trainable'] = trainable
             encoder_args['weights_regularizer'] = L1_REGULARIZER
@@ -263,7 +262,7 @@ def test_sequence_encoders():
     }
 
     # Different values for reduce_output and the corresponding expected size
-    # TODO Figure out the output size for parallel 1d conv
+    # todo figure out the output size for parallel 1d conv
     reduce_outputs = ['sum', 'max']
     output_shapes = [
         [num_sentences, fc_size],

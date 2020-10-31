@@ -27,12 +27,12 @@ from ludwig.encoders.category_encoders import CategoricalSparseEncoder
 from ludwig.encoders.generic_encoders import PassthroughEncoder
 from ludwig.features.base_feature import InputFeature
 from ludwig.features.base_feature import OutputFeature
-from ludwig.globals import is_on_master
 from ludwig.modules.loss_modules import SampledSoftmaxCrossEntropyLoss
 from ludwig.modules.loss_modules import SoftmaxCrossEntropyLoss
 from ludwig.modules.metric_modules import CategoryAccuracy
 from ludwig.modules.metric_modules import HitsAtKMetric
 from ludwig.modules.metric_modules import SoftmaxCrossEntropyMetric
+from ludwig.utils.horovod_utils import is_on_master
 from ludwig.utils.math_utils import int_type
 from ludwig.utils.math_utils import softmax
 from ludwig.utils.metrics_utils import ConfusionMatrix
@@ -85,13 +85,13 @@ class CategoryFeatureMixin(object):
     def add_feature_data(
             feature,
             dataset_df,
-            data,
+            dataset,
             metadata,
             preprocessing_parameters=None
     ):
-        data[feature['name']] = CategoryFeatureMixin.feature_data(
-            dataset_df[feature['name']].astype(str),
-            metadata[feature['name']]
+        dataset[feature[NAME]] = CategoryFeatureMixin.feature_data(
+            dataset_df[feature[NAME]].astype(str),
+            metadata[feature[NAME]]
         )
 
 
@@ -127,7 +127,7 @@ class CategoryInputFeature(CategoryFeatureMixin, InputFeature):
         return ()
 
     @staticmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             input_feature,
             feature_metadata,
             *args,
@@ -198,6 +198,12 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
             LOGITS: logits
         }
 
+    def get_output_dtype(self):
+        return tf.int64
+
+    def get_output_shape(self):
+        return ()
+
     def _setup_loss(self):
         if self.loss[TYPE] == 'softmax_cross_entropy':
             self.train_loss_function = SoftmaxCrossEntropyLoss(
@@ -226,6 +232,7 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
         )
 
     def _setup_metrics(self):
+        self.metric_functions = {}  # needed to shadow class variable
         self.metric_functions[LOSS] = self.eval_loss_function
         self.metric_functions[ACCURACY] = CategoryAccuracy(
             name='metric_accuracy'
@@ -235,14 +242,8 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
             name='metric_top_k_hits'
         )
 
-    def get_output_dtype(self):
-        return tf.int64
-
-    def get_output_shape(self):
-        return ()
-
     @staticmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             output_feature,
             feature_metadata,
             *args,
@@ -265,7 +266,7 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
                     'for the <UNK> class too.'.format(
                         len(output_feature[LOSS]['class_weights']),
                         output_feature['num_classes'],
-                        output_feature['name']
+                        output_feature[NAME]
                     )
                 )
 
@@ -282,7 +283,7 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
                     'for the <UNK> class too.'.format(
                         output_feature[LOSS]['class_weights'].keys(),
                         feature_metadata['str2idx'].keys(),
-                        output_feature['name']
+                        output_feature[NAME]
                     )
                 )
             else:
@@ -314,7 +315,7 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
                                 'the first row {}. All rows must have '
                                 'the same length.'.format(
                                     curr_row,
-                                    output_feature['name'],
+                                    output_feature[NAME],
                                     curr_row_length,
                                     first_row_length
                                 )
@@ -328,7 +329,7 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
                         'The class_similarities matrix of {} has '
                         '{} rows and {} columns, '
                         'their number must be identical.'.format(
-                            output_feature['name'],
+                            output_feature[NAME],
                             len(similarities),
                             all_rows_length
                         )
@@ -341,7 +342,7 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
                         'Check the metadata JSON file to see the classes '
                         'and their order and '
                         'consider <UNK> class too.'.format(
-                            output_feature['name'],
+                            output_feature[NAME],
                             all_rows_length,
                             output_feature['num_classes']
                         )
@@ -359,7 +360,7 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
                 raise ValueError(
                     'class_similarities_temperature > 0, '
                     'but no class_similarities are provided '
-                    'for feature {}'.format(output_feature['name'])
+                    'for feature {}'.format(output_feature[NAME])
                 )
 
         if output_feature[LOSS][TYPE] == 'sampled_softmax_cross_entropy':
@@ -370,41 +371,40 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
 
     @staticmethod
     def calculate_overall_stats(
-            test_stats,
-            output_feature,
-            dataset,
+            predictions,
+            targets,
             train_set_metadata
     ):
-        feature_name = output_feature['name']
-        stats = test_stats[feature_name]
+        overall_stats = {}
         confusion_matrix = ConfusionMatrix(
-            dataset.get(feature_name),
-            stats[PREDICTIONS],
-            labels=train_set_metadata[feature_name]['idx2str']
+            targets,
+            predictions[PREDICTIONS],
+            labels=train_set_metadata['idx2str']
         )
-        stats['confusion_matrix'] = confusion_matrix.cm.tolist()
-        stats['overall_stats'] = confusion_matrix.stats()
-        stats['per_class_stats'] = confusion_matrix.per_class_stats()
+        overall_stats['confusion_matrix'] = confusion_matrix.cm.tolist()
+        overall_stats['overall_stats'] = confusion_matrix.stats()
+        overall_stats['per_class_stats'] = confusion_matrix.per_class_stats()
 
-    @staticmethod
-    def postprocess_results(
-            output_feature,
-            result,
+        return overall_stats
+
+    def postprocess_predictions(
+            self,
+            predictions,
             metadata,
-            experiment_dir_name,
+            output_directory,
             skip_save_unprocessed_output=False,
     ):
         postprocessed = {}
-        name = output_feature['name']
+        name = self.feature_name
 
         npy_filename = None
         if is_on_master():
-            npy_filename = os.path.join(experiment_dir_name, '{}_{}.npy')
+            npy_filename = os.path.join(output_directory, '{}_{}.npy')
         else:
             skip_save_unprocessed_output = True
 
-        if PREDICTIONS in result and len(result[PREDICTIONS]) > 0:
-            preds = result[PREDICTIONS]
+        if PREDICTIONS in predictions and len(predictions[PREDICTIONS]) > 0:
+            preds = predictions[PREDICTIONS]
             if 'idx2str' in metadata:
                 postprocessed[PREDICTIONS] = [
                     metadata['idx2str'][pred] for pred in preds
@@ -416,10 +416,11 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
             if not skip_save_unprocessed_output:
                 np.save(npy_filename.format(name, PREDICTIONS), preds)
 
-            del result[PREDICTIONS]
+            del predictions[PREDICTIONS]
 
-        if PROBABILITIES in result and len(result[PROBABILITIES]) > 0:
-            probs = result[PROBABILITIES].numpy()
+        if PROBABILITIES in predictions and len(
+                predictions[PROBABILITIES]) > 0:
+            probs = predictions[PROBABILITIES].numpy()
             prob = np.amax(probs, axis=1)
             postprocessed[PROBABILITIES] = probs
             postprocessed[PROBABILITY] = prob
@@ -428,12 +429,12 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
                 np.save(npy_filename.format(name, PROBABILITIES), probs)
                 np.save(npy_filename.format(name, PROBABILITY), probs)
 
-            del result[PROBABILITIES]
+            del predictions[PROBABILITIES]
 
-        if ('predictions_top_k' in result and
-            len(result['predictions_top_k'])) > 0:
+        if ('predictions_top_k' in predictions and
+            len(predictions['predictions_top_k'])) > 0:
 
-            preds_top_k = result['predictions_top_k']
+            preds_top_k = predictions['predictions_top_k']
             if 'idx2str' in metadata:
                 postprocessed['predictions_top_k'] = [
                     [metadata['idx2str'][pred] for pred in pred_top_k]
@@ -448,7 +449,7 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
                     preds_top_k
                 )
 
-            del result['predictions_top_k']
+            del predictions['predictions_top_k']
 
         return postprocessed
 
@@ -461,7 +462,7 @@ class CategoryOutputFeature(CategoryFeatureMixin, OutputFeature):
         set_default_values(
             output_feature[LOSS],
             {
-                'type': 'softmax_cross_entropy',
+                TYPE: 'softmax_cross_entropy',
                 'labels_smoothing': 0,
                 'class_weights': 1,
                 'robust_lambda': 0,

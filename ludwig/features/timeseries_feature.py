@@ -21,7 +21,8 @@ import tensorflow as tf
 
 from ludwig.constants import *
 from ludwig.encoders.sequence_encoders import StackedCNN, ParallelCNN, \
-    StackedParallelCNN, StackedRNN, StackedCNNRNN, SequencePassthroughEncoder
+    StackedParallelCNN, StackedRNN, StackedCNNRNN, SequencePassthroughEncoder, \
+    StackedTransformer
 from ludwig.features.sequence_feature import SequenceInputFeature
 from ludwig.utils.misc_utils import get_from_registry, set_default_values
 from ludwig.utils.strings_utils import tokenizer_registry
@@ -114,16 +115,15 @@ class TimeseriesFeatureMixin(object):
     def add_feature_data(
             feature,
             dataset_df,
-            data,
+            dataset,
             metadata,
             preprocessing_parameters
     ):
-        timeseries_data = TimeseriesFeatureMixin.feature_data(
-            dataset_df[feature['name']].astype(str),
-            metadata[feature['name']],
+        dataset[feature[NAME]] = TimeseriesFeatureMixin.feature_data(
+            dataset_df[feature[NAME]].astype(str),
+            metadata[feature[NAME]],
             preprocessing_parameters
         )
-        data[feature['name']] = timeseries_data
 
 
 class TimeseriesInputFeature(TimeseriesFeatureMixin, SequenceInputFeature):
@@ -153,7 +153,7 @@ class TimeseriesInputFeature(TimeseriesFeatureMixin, SequenceInputFeature):
         return self.max_sequence_length,
 
     @staticmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             input_feature,
             feature_metadata,
             *args,
@@ -180,6 +180,7 @@ class TimeseriesInputFeature(TimeseriesFeatureMixin, SequenceInputFeature):
         'stacked_parallel_cnn': StackedParallelCNN,
         'rnn': StackedRNN,
         'cnnrnn': StackedCNNRNN,
+        'transformer': StackedTransformer,
         'passthrough': SequencePassthroughEncoder,
         'null': SequencePassthroughEncoder,
         'none': SequencePassthroughEncoder,
@@ -197,7 +198,7 @@ class TimeseriesInputFeature(TimeseriesFeatureMixin, SequenceInputFeature):
 #
 #         self.loss = {
 #             'weight': 1,
-#             'type': 'softmax_cross_entropy',
+#             TYPE: 'softmax_cross_entropy',
 #             'class_weights': 1,
 #             'class_similarities_temperature': 0
 #         }
@@ -342,43 +343,43 @@ class TimeseriesInputFeature(TimeseriesFeatureMixin, SequenceInputFeature):
 #             'output': EVAL_LOSS,
 #             'aggregation': SUM,
 #             'value': 0,
-#             'type': METRIC
+#             TYPE: METRIC
 #         }),
 #         (MEAN_SQUARED_ERROR, {
 #             'output': SQUARED_ERROR,
 #             'aggregation': SUM,
 #             'value': 0,
-#             'type': METRIC
+#             TYPE: METRIC
 #         }),
 #         (MEAN_ABSOLUTE_ERROR, {
 #             'output': ABSOLUTE_ERROR,
 #             'aggregation': SUM,
 #             'value': 0,
-#             'type': METRIC
+#             TYPE: METRIC
 #         }),
 #         (R2, {
 #             'output': R2,
 #             'aggregation': SUM,
 #             'value': 0,
-#             'type': METRIC
+#             TYPE: METRIC
 #         }),
 #         (ERROR, {
 #             'output': ERROR,
 #             'aggregation': SUM,
 #             'value': 0,
-#             'type': METRIC
+#             TYPE: METRIC
 #         }),
 #         (PREDICTIONS, {
 #             'output': PREDICTIONS,
 #             'aggregation': APPEND,
 #             'value': [],
-#             'type': PREDICTION
+#             TYPE: PREDICTION
 #         }),
 #         (LENGTHS, {
 #             'output': LENGTHS,
 #             'aggregation': APPEND,
 #             'value': [],
-#             'type': PREDICTION
+#             TYPE: PREDICTION
 #         })
 #     ])
 #
@@ -390,7 +391,7 @@ class TimeseriesInputFeature(TimeseriesFeatureMixin, SequenceInputFeature):
 #
 #
 #     @staticmethod
-#     def update_model_definition_with_metadata(
+#     def update_config_with_metadata(
 #             output_feature,
 #             feature_metadata,
 #             *args,
@@ -409,12 +410,12 @@ class TimeseriesInputFeature(TimeseriesFeatureMixin, SequenceInputFeature):
 #     ):
 #         pass
 #
-#     @staticmethod
-#     def postprocess_results(
-#             output_feature,
+#
+#     def postprocess_predictions(
+#             self,
 #             result,
 #             metadata,
-#             experiment_dir_name,
+#             output_directory,
 #             skip_save_unprocessed_output=False,
 #     ):
 #         pass
@@ -424,9 +425,9 @@ class TimeseriesInputFeature(TimeseriesFeatureMixin, SequenceInputFeature):
 #         set_default_value(
 #             output_feature,
 #             LOSS,
-#             {'type': 'mean_absolute_error', 'weight': 1}
+#             {TYPE: 'mean_absolute_error', 'weight': 1}
 #         )
-#         set_default_value(output_feature[LOSS], 'type', 'mean_absolute_error')
+#         set_default_value(output_feature[LOSS], TYPE, 'mean_absolute_error')
 #         set_default_value(output_feature[LOSS], 'weight', 1)
 #
 #         set_default_value(output_feature, 'decoder', 'generator')

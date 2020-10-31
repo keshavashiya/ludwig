@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-
 import logging
+import os.path
 
 import pytest
 
 from ludwig.hyperopt.execution import get_build_hyperopt_executor
+from ludwig.hyperopt.run import hyperopt
 from ludwig.hyperopt.sampling import (get_build_hyperopt_sampler)
 from ludwig.hyperopt.utils import update_hyperopt_params_with_defaults
 from ludwig.utils.defaults import merge_with_defaults, ACCURACY
@@ -49,7 +50,11 @@ HYPEROPT_CONFIG = {
         },
         "utterance.cell_type": {
             "type": "category",
-            "values": ["rnn", "gru", "lstm"]
+            "values": ["rnn", "gru"]
+        },
+        "utterance.bidirectional": {
+            "type": "category",
+            "values": [True, False]
         }
     },
     "goal": "minimize"
@@ -81,14 +86,14 @@ def test_hyperopt_executor(sampler, executor, csv_filename,
 
     rel_path = generate_data(input_features, output_features, csv_filename)
 
-    model_definition = {
+    config = {
         "input_features": input_features,
         "output_features": output_features,
         "combiner": {"type": "concat", "num_fc_layers": 2},
         "training": {"epochs": 2, "learning_rate": 0.001}
     }
 
-    model_definition = merge_with_defaults(model_definition)
+    config = merge_with_defaults(config)
 
     hyperopt_config = HYPEROPT_CONFIG.copy()
 
@@ -111,7 +116,8 @@ def test_hyperopt_executor(sampler, executor, csv_filename,
     hyperopt_executor = get_build_hyperopt_executor(executor["type"])(
         hyperopt_sampler, output_feature, metric, split, **executor)
 
-    hyperopt_executor.execute(model_definition, data_csv=rel_path,
+    hyperopt_executor.execute(config,
+                              dataset=rel_path,
                               gpus=get_available_gpus_cuda_string())
 
 
@@ -121,3 +127,70 @@ def test_hyperopt_executor_with_metric(csv_filename):
                            csv_filename,
                            validate_output_feature=True,
                            validation_metric=ACCURACY)
+
+def test_hyperopt_run_hyperopt(csv_filename):
+    input_features = [
+        text_feature(name="utterance", cell_type="lstm", reduce_output="sum"),
+        category_feature(vocab_size=2, reduce_input="sum")]
+
+    output_features = [category_feature(vocab_size=2, reduce_input="sum")]
+
+    rel_path = generate_data(input_features, output_features, csv_filename)
+
+    config = {
+        "input_features": input_features,
+        "output_features": output_features,
+        "combiner": {"type": "concat", "num_fc_layers": 2},
+        "training": {"epochs": 2, "learning_rate": 0.001}
+    }
+
+    output_feature_name = output_features[0]['name']
+
+    hyperopt_configs = {
+        "parameters": {
+            "training.learning_rate": {
+                "type": "float",
+                "low": 0.0001,
+                "high": 0.01,
+                "space": "log",
+                "steps": 3,
+            },
+            output_feature_name + ".fc_size": {
+                "type": "int",
+                "low": 32,
+                "high": 256,
+                "steps": 5
+            },
+            output_feature_name + ".num_fc_layers": {
+                'type': 'int',
+                'low': 1,
+                'high': 5,
+                'space': 'linear',
+                'steps': 4
+            }
+        },
+        "goal": "minimize",
+        'output_feature': output_feature_name,
+        'validation_metrics': 'loss',
+        'executor': {'type': 'serial'},
+        'sampler': {'type': 'random', 'num_samples': 2}
+    }
+
+    # add hyperopt parameter space to the config
+    config['hyperopt'] = hyperopt_configs
+
+    hyperopt_results = hyperopt(
+        config,
+        dataset=rel_path,
+        output_directory='results_hyperopt'
+    )
+
+    # check for return results
+    assert isinstance(hyperopt_results, list)
+
+    # check for existence of the hyperopt statistics file
+    assert os.path.isfile(
+        os.path.join('results_hyperopt', 'hyperopt_statistics.json')
+    )
+
+

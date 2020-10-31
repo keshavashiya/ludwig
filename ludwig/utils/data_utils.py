@@ -30,11 +30,37 @@ import pandas as pd
 from pandas.errors import ParserError
 from sklearn.model_selection import KFold
 
-from ludwig.constants import SPLIT
-from ludwig.globals import MODEL_HYPERPARAMETERS_FILE_NAME, \
-    TRAIN_SET_METADATA_FILE_NAME, MODEL_WEIGHTS_FILE_NAME
+from ludwig.constants import NAME, PREPROCESSING, SPLIT
+from ludwig.globals import (MODEL_HYPERPARAMETERS_FILE_NAME,
+                            MODEL_WEIGHTS_FILE_NAME,
+                            TRAIN_SET_METADATA_FILE_NAME)
 
 logger = logging.getLogger(__name__)
+
+DATA_TRAIN_HDF5_FP = 'data_train_hdf5_fp'
+DICT_FORMATS = {'dict', 'dictionary', dict}
+DATAFRAME_FORMATS = {'dataframe', 'df', pd.DataFrame}
+CSV_FORMATS = {'csv'}
+TSV_FORMATS = {'tsv'}
+JSON_FORMATS = {'json'}
+JSONL_FORMATS = {'jsonl'}
+EXCEL_FORMATS = {'excel'}
+PARQUET_FORMATS = {'parquet'}
+PICKLE_FORMATS = {'pickle'}
+FEATHER_FORMATS = {'feather'}
+FWF_FORMATS = {'fwf'}
+HTML_FORMATS = {'html'}
+ORC_FORMATS = {'orc'}
+SAS_FORMATS = {'sas'}
+SPSS_FORMATS = {'spss'}
+STATA_FORMATS = {'stata'}
+HDF5_FORMATS = {'hdf5', 'h5'}
+CACHEABLE_FORMATS = set.union(*(CSV_FORMATS, TSV_FORMATS,
+                                JSON_FORMATS, JSONL_FORMATS,
+                                EXCEL_FORMATS, PARQUET_FORMATS, PICKLE_FORMATS,
+                                FEATHER_FORMATS, FWF_FORMATS, HTML_FORMATS,
+                                ORC_FORMATS, SAS_FORMATS, SPSS_FORMATS,
+                                STATA_FORMATS))
 
 
 def get_abs_path(data_csv_path, file_path):
@@ -51,25 +77,24 @@ def load_csv(data_fp):
     return data
 
 
-def read_csv(data_fp, header=0, nrows=None, skiprows=None):
+def read_xsv(data_fp, separator=',', header=0, nrows=None, skiprows=None):
     """
     Helper method to read a csv file. Wraps around pd.read_csv to handle some
     exceptions. Can extend to cover cases as necessary
-    :param data_fp: path to the csv file
+    :param data_fp: path to the xsv file
+    :param separator: defaults separator to use for splitting
     :param header: header argument for pandas to read the csv
     :param nrows: number of rows to read from the csv, None means all
     :param skiprows: number of rows to skip from the csv, None means no skips
     :return: Pandas dataframe with the data
     """
-
-    separator = ','
     with open(data_fp, 'r', encoding="utf8") as csvfile:
         try:
             dialect = csv.Sniffer().sniff(csvfile.read(1024 * 100),
                                           delimiters=[',', '\t', '|'])
             separator = dialect.delimiter
         except csv.Error:
-            # Could not conclude the delimiter, defaulting to comma
+            # Could not conclude the delimiter, defaulting to user provided
             pass
 
     try:
@@ -78,10 +103,66 @@ def read_csv(data_fp, header=0, nrows=None, skiprows=None):
     except ParserError:
         logger.warning('Failed to parse the CSV with pandas default way,'
                        ' trying \\ as escape character.')
-        df = pd.read_csv(data_fp, sep=separator, header=header, escapechar='\\',
+        df = pd.read_csv(data_fp, sep=separator, header=header,
+                         escapechar='\\',
                          nrows=nrows, skiprows=skiprows)
 
     return df
+
+
+read_csv = functools.partial(read_xsv, separator=',')
+read_tsv = functools.partial(read_xsv, separator='\t')
+
+
+def read_json(data_fp, normalize=False):
+    if normalize:
+        return pd.json_normalize(load_json(data_fp))
+    else:
+        return pd.read_json(data_fp)
+
+
+def read_jsonl(data_fp):
+    return pd.read_json(data_fp, lines=True)
+
+
+def read_excel(data_fp):
+    return pd.read_excel(data_fp)
+
+
+def read_parquet(data_fp):
+    return pd.read_parquet(data_fp)
+
+
+def read_pickle(data_fp):
+    return pd.read_pickle(data_fp)
+
+
+def read_fwf(data_fp):
+    return pd.read_fwf(data_fp)
+
+
+def read_feather(data_fp):
+    return pd.read_feather(data_fp)
+
+
+def read_html(data_fp):
+    return pd.read_html(data_fp)[0]
+
+
+def read_orc(data_fp):
+    return pd.read_orc(data_fp)
+
+
+def read_sas(data_fp):
+    return pd.read_sas(data_fp)
+
+
+def read_spss(data_fp):
+    return pd.read_spss(data_fp)
+
+
+def read_stata(data_fp):
+    return pd.read_stata(data_fp)
 
 
 def save_csv(data_fp, data):
@@ -99,7 +180,6 @@ def csv_contains_column(data_fp, column_name):
 
 
 def load_json(data_fp):
-    data = []
     with open(data_fp, 'r') as input_file:
         data = json.load(input_file)
     return data
@@ -281,22 +361,7 @@ def shuffle_dict_unison_inplace(np_dict, random_state=None):
     return recon
 
 
-def shuffle_inplace(np_dict):
-    if len(np_dict) == 0:
-        return
-    size = np_dict[next(iter(np_dict))].shape[0]
-    for k in np_dict:
-        if np_dict[k].shape[0] != size:
-            raise ValueError(
-                'Invalid: dictionary contains variable length arrays')
-
-    p = np.random.permutation(size)
-
-    for k in np_dict:
-        np_dict[k] = np_dict[k][p]
-
-
-def split_dataset_tvt(dataset, split):
+def split_dataset_ttv(dataset, split):
     if SPLIT in dataset:
         del dataset[SPLIT]
     training_set = split_dataset(dataset, split, value_to_split=0)
@@ -325,7 +390,7 @@ def class_counts(dataset, labels_field):
 
 
 def text_feature_data_field(text_feature):
-    return text_feature['name'] + '_' + text_feature['level']
+    return text_feature[NAME] + '_' + text_feature['level']
 
 
 def load_from_file(file_name, field=None, dtype=int, ground_truth_split=2):
@@ -367,9 +432,10 @@ def replace_file_extension(file_path, extension):
     """
     if file_path is None:
         return None
-    if '.' in extension:
+    extension = extension.strip()
+    if extension.startswith('.'):
         # Handle the case if the user calls with '.hdf5' instead of 'hdf5'
-        extension = extension.replace('.', '').strip()
+        extension = extension[1:]
 
     return os.path.splitext(file_path)[0] + '.' + extension
 
@@ -417,11 +483,24 @@ def add_sequence_feature_column(df, col_name, seq_length):
 def override_in_memory_flag(input_features, override_value):
     num_overrides = 0
     for feature in input_features:
-        if 'preprocessing' in feature:
-            if 'in_memory' in feature['preprocessing']:
-                feature['preprocessing']['in_memory'] = override_value
+        if PREPROCESSING in feature:
+            if 'in_memory' in feature[PREPROCESSING]:
+                feature[PREPROCESSING]['in_memory'] = override_value
                 num_overrides += 1
     return num_overrides
+
+
+def normalize_numpy(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return normalize_numpy(obj.tolist())
+    elif isinstance(obj, list):
+        return [normalize_numpy(v) for v in obj]
+    else:
+        return obj
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -477,6 +556,88 @@ def clear_data_cache():
     load_glove.cache_clear()
 
 
+def figure_data_format_dataset(dataset):
+    if isinstance(dataset, pd.DataFrame):
+        return pd.DataFrame
+    elif isinstance(dataset, dict):
+        return dict
+    elif isinstance(dataset, str):
+        dataset = dataset.lower()
+        if dataset.endswith('.csv'):
+            return 'csv'
+        elif dataset.endswith('.tsv'):
+            return 'tsv'
+        elif dataset.endswith('.json'):
+            return 'json'
+        elif dataset.endswith('.jsonl'):
+            return 'jsonl'
+        elif (dataset.endswith('.xls') or dataset.endswith('.xlsx') or
+              dataset.endswith('.xlsm') or dataset.endswith('.xlsb') or
+              dataset.endswith('.odf') or dataset.endswith('.ods') or
+              dataset.endswith('.odt')):
+            return 'excel'
+        elif dataset.endswith('.parquet'):
+            return 'parquet'
+        elif dataset.endswith('.pickle') or dataset.endswith('.p'):
+            return 'pickle'
+        elif dataset.endswith('.feather'):
+            return 'feather'
+        elif dataset.endswith('.fwf'):
+            return 'fwf'
+        elif dataset.endswith('.html'):
+            return 'html'
+        elif dataset.endswith('.orc'):
+            return 'orc'
+        elif dataset.endswith('.sas'):
+            return 'sas'
+        elif dataset.endswith('.spss'):
+            return 'spss'
+        elif dataset.endswith('.dta') or dataset.endswith('.stata'):
+            return 'stata'
+        elif dataset.endswith('.h5') or dataset.endswith('.hdf5'):
+            return 'hdf5'
+        else:
+            raise ValueError(
+                "Dataset path string {} "
+                "does not contain a valid extension".format(dataset)
+            )
+    else:
+        raise ValueError(
+            "Cannot figure out the format of dataset {}".format(dataset)
+        )
+
+
+def figure_data_format(
+        dataset=None, training_set=None, validation_set=None, test_set=None
+):
+    if dataset is not None:
+        data_format = figure_data_format_dataset(dataset)
+    elif training_set is not None:
+        data_formats = [figure_data_format_dataset(training_set)]
+        if validation_set is not None:
+            data_formats.append(figure_data_format_dataset(validation_set))
+        if test_set is not None:
+            data_formats.append(figure_data_format_dataset(test_set))
+        data_formats_set = set(data_formats)
+        if len(data_formats_set) > 1:
+            error_message = "Datasets have different formats. Training: "
+            error_message += str(data_formats[0])
+            if validation_set:
+                error_message = ", Validation: "
+                error_message += str(data_formats[1])
+            if test_set:
+                error_message = ", Test: "
+                error_message += str(data_formats[-1])
+            raise ValueError(error_message)
+        else:
+            data_format = next(iter(data_formats_set))
+    else:
+        raise ValueError(
+            "At least one between dataset and training_set must be not None"
+        )
+    return data_format
+
+
 def is_model_dir(path: str) -> bool:
     hyperparameters_fn = os.path.join(path, MODEL_HYPERPARAMETERS_FILE_NAME)
     ts_metadata_fn = os.path.join(path, TRAIN_SET_METADATA_FILE_NAME)
@@ -491,3 +652,21 @@ def is_model_dir(path: str) -> bool:
         if weights_files_count >= 2:
             is_model_dir = True
     return is_model_dir
+
+
+external_data_reader_registry = {
+    **{fmt: read_csv for fmt in CSV_FORMATS},
+    **{fmt: read_tsv for fmt in TSV_FORMATS},
+    **{fmt: read_json for fmt in JSON_FORMATS},
+    **{fmt: read_jsonl for fmt in JSONL_FORMATS},
+    **{fmt: read_excel for fmt in EXCEL_FORMATS},
+    **{fmt: read_parquet for fmt in PARQUET_FORMATS},
+    **{fmt: read_pickle for fmt in PICKLE_FORMATS},
+    **{fmt: read_fwf for fmt in FWF_FORMATS},
+    **{fmt: read_feather for fmt in FEATHER_FORMATS},
+    **{fmt: read_html for fmt in HTML_FORMATS},
+    **{fmt: read_orc for fmt in ORC_FORMATS},
+    **{fmt: read_sas for fmt in SAS_FORMATS},
+    **{fmt: read_spss for fmt in SPSS_FORMATS},
+    **{fmt: read_stata for fmt in STATA_FORMATS}
+}

@@ -17,11 +17,12 @@
 import os
 
 import numpy as np
+
 from ludwig.constants import *
 from ludwig.encoders.text_encoders import *
 from ludwig.features.sequence_feature import SequenceInputFeature
 from ludwig.features.sequence_feature import SequenceOutputFeature
-from ludwig.globals import is_on_master
+from ludwig.utils.horovod_utils import is_on_master
 from ludwig.utils.math_utils import softmax
 from ludwig.utils.metrics_utils import ConfusionMatrix
 from ludwig.utils.misc_utils import get_from_registry
@@ -75,7 +76,6 @@ class TextFeatureMixin(object):
             padding_symbol=preprocessing_parameters['padding_symbol'],
             pretrained_model_name_or_path=preprocessing_parameters[
                 'pretrained_model_name_or_path']
-
         )
         (
             word_idx2str,
@@ -203,16 +203,16 @@ class TextFeatureMixin(object):
     def add_feature_data(
             feature,
             dataset_df,
-            data,
+            dataset,
             metadata,
             preprocessing_parameters
     ):
         chars_data, words_data = TextFeatureMixin.feature_data(
-            dataset_df[feature['name']].astype(str),
-            metadata[feature['name']], preprocessing_parameters
+            dataset_df[feature[NAME]].astype(str),
+            metadata[feature[NAME]], preprocessing_parameters
         )
-        data['{}_char'.format(feature['name'])] = chars_data
-        data['{}_word'.format(feature['name'])] = words_data
+        dataset['{}_char'.format(feature[NAME])] = chars_data
+        dataset['{}_word'.format(feature[NAME])] = words_data
 
 
 class TextInputFeature(TextFeatureMixin, SequenceInputFeature):
@@ -227,7 +227,6 @@ class TextInputFeature(TextFeatureMixin, SequenceInputFeature):
         else:
             self.pad_idx = None
 
-
     def call(self, inputs, training=None, mask=None):
         assert isinstance(inputs, tf.Tensor)
         assert inputs.dtype == tf.int8 or inputs.dtype == tf.int16 or \
@@ -237,9 +236,8 @@ class TextInputFeature(TextFeatureMixin, SequenceInputFeature):
         inputs_exp = tf.cast(inputs, dtype=tf.int32)
 
         if self.pad_idx is not None:
-            inputs_mask = tf.cast(tf.not_equal(inputs, self.pad_idx),
-                                dtype=tf.int32)
-        else: 
+            inputs_mask = tf.not_equal(inputs, self.pad_idx)
+        else:
             inputs_mask = None
 
         encoder_output = self.encoder_obj(
@@ -255,7 +253,7 @@ class TextInputFeature(TextFeatureMixin, SequenceInputFeature):
         return None,
 
     @staticmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             input_feature,
             feature_metadata,
             *args,
@@ -336,8 +334,11 @@ class TextOutputFeature(TextFeatureMixin, SequenceOutputFeature):
     def get_output_shape(self):
         return self.max_sequence_length,
 
+    def overall_statistics_metadata(self):
+        return {'level': self.level}
+
     @staticmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             output_feature,
             feature_metadata,
             *args,
@@ -379,7 +380,7 @@ class TextOutputFeature(TextFeatureMixin, SequenceOutputFeature):
                 raise ValueError(
                     'class_similarities_temperature > 0,'
                     'but no class similarities are provided '
-                    'for feature {}'.format(output_feature['name'])
+                    'for feature {}'.format(output_feature[NAME])
                 )
 
         if output_feature[LOSS][TYPE] == 'sampled_softmax_cross_entropy':
@@ -392,47 +393,47 @@ class TextOutputFeature(TextFeatureMixin, SequenceOutputFeature):
 
     @staticmethod
     def calculate_overall_stats(
-            test_stats,
-            output_feature,
-            dataset,
-            train_set_metadata
+            predictions,
+            targets,
+            train_set_metadata,
     ):
-        feature_name = output_feature['name']
-        level_idx2str = '{}_{}'.format(output_feature['level'], 'idx2str')
-        sequences = dataset.get(feature_name)
+        overall_stats = {}
+        level_idx2str = '{}_{}'.format(train_set_metadata['level'], 'idx2str')
+
+        sequences = targets
         last_elem_sequence = sequences[np.arange(sequences.shape[0]),
                                        (sequences != 0).cumsum(1).argmax(1)]
-        stats = test_stats[feature_name]
         confusion_matrix = ConfusionMatrix(
             last_elem_sequence,
-            stats[LAST_PREDICTIONS],
-            labels=train_set_metadata[feature_name][level_idx2str]
+            predictions[LAST_PREDICTIONS],
+            labels=train_set_metadata[level_idx2str]
         )
-        stats['confusion_matrix'] = confusion_matrix.cm.tolist()
-        stats['overall_stats'] = confusion_matrix.stats()
-        stats['per_class_stats'] = confusion_matrix.per_class_stats()
+        overall_stats['confusion_matrix'] = confusion_matrix.cm.tolist()
+        overall_stats['overall_stats'] = confusion_matrix.stats()
+        overall_stats['per_class_stats'] = confusion_matrix.per_class_stats()
 
-    @staticmethod
-    def postprocess_results(
-            output_feature,
+        return overall_stats
+
+    def postprocess_predictions(
+            self,
             result,
             metadata,
-            experiment_dir_name,
+            output_directory,
             skip_save_unprocessed_output=False,
     ):
-        # todo: refactor to reuse SeuuqnceOutputFeature.postprocess_results
+        # todo: refactor to reuse SequenceOutputFeature.postprocess_predictions
         postprocessed = {}
-        name = output_feature['name']
-        level_idx2str = '{}_{}'.format(output_feature['level'], 'idx2str')
+        name = self.feature_name
+        level_idx2str = '{}_{}'.format(self.level, 'idx2str')
 
         npy_filename = None
         if is_on_master():
-            npy_filename = os.path.join(experiment_dir_name, '{}_{}.npy')
+            npy_filename = os.path.join(output_directory, '{}_{}.npy')
         else:
             skip_save_unprocessed_output = True
 
         if PREDICTIONS in result and len(result[PREDICTIONS]) > 0:
-            preds = result[PREDICTIONS]
+            preds = result[PREDICTIONS].numpy()
             if level_idx2str in metadata:
                 postprocessed[PREDICTIONS] = [
                     [metadata[level_idx2str][token]
@@ -450,7 +451,7 @@ class TextOutputFeature(TextFeatureMixin, SequenceOutputFeature):
             del result[PREDICTIONS]
 
         if LAST_PREDICTIONS in result and len(result[LAST_PREDICTIONS]) > 0:
-            last_preds = result[LAST_PREDICTIONS]
+            last_preds = result[LAST_PREDICTIONS].numpy()
             if level_idx2str in metadata:
                 postprocessed[LAST_PREDICTIONS] = [
                     metadata[level_idx2str][last_pred]

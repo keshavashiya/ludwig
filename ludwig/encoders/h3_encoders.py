@@ -326,13 +326,17 @@ class H3WeightedSum(Layer):
         self.should_softmax = should_softmax
         self.reduce_sequence = SequenceReducer(reduce_mode='sum')
 
-
         self.h3_embed = H3Embed(
             embedding_size,
             embeddings_on_cpu=embeddings_on_cpu,
             dropout=dropout,
-            initializer=weights_initializer,
-            regularize=weights_regularizer,
+            weights_initializer=weights_initializer,
+            bias_initializer=bias_initializer,
+            weights_regularizer=weights_regularizer,
+            bias_regularizer=bias_regularizer,
+            activity_regularizer=activity_regularizer,
+            # weights_constraint=weights_constraint,
+            # bias_constraint=bias_constraint,
             reduce_output=None
         )
 
@@ -424,8 +428,6 @@ class H3RNN(Layer):
             activity_regularizer=None,
             dropout=0.0,
             recurrent_dropout=0.0,
-            initializer=None,
-            regularize=True,
             reduce_output='last',
             **kwargs
     ):
@@ -533,8 +535,13 @@ class H3RNN(Layer):
             embedding_size,
             embeddings_on_cpu=embeddings_on_cpu,
             dropout=dropout,
-            initializer=initializer,
-            regularize=regularize,
+            weights_initializer=weights_initializer,
+            bias_initializer=bias_initializer,
+            weights_regularizer=weights_regularizer,
+            bias_regularizer=bias_regularizer,
+            activity_regularizer=activity_regularizer,
+            # weights_constraint=weights_constraint,
+            # bias_constraint=bias_constraint,
             reduce_output=None
         )
 
@@ -557,7 +564,6 @@ class H3RNN(Layer):
             activity_regularizer=activity_regularizer,
             dropout=dropout,
             recurrent_dropout=recurrent_dropout,
-            regularize=regularize,
             reduce_output=reduce_output
         )
 

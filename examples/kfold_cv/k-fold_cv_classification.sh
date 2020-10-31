@@ -9,8 +9,8 @@ python prepare_classification_data_set.py
 # Run 5-fold cross validation
 #
 ludwig experiment \
-  --model_definition_file model_definition.yaml \
-  --data_csv data/train.csv \
+  --config_file config.yaml \
+  --dataset data/train.csv \
   --output_directory results \
   --logging_level 'error' \
   -kf 5

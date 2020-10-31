@@ -14,18 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-import sys
 import logging
+import sys
 
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
+
 from ludwig.modules.reduction_modules import SequenceReducer
 
 logger = logging.getLogger(__name__)
 
-class BERTEncoder(Layer):
 
+class BERTEncoder(Layer):
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -38,11 +40,11 @@ class BERTEncoder(Layer):
             pretrained_model_name_or_path='bert-base-uncased',
             reduce_output='cls_pooled',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(BERTEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFBertModel
         except ModuleNotFoundError:
             logger.error(
@@ -61,13 +63,14 @@ class BERTEncoder(Layer):
         self.transformer.trainable = trainable
         self.transformer.resize_token_embeddings(num_tokens)
 
-
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            "input_ids" : inputs, 
-            "training" : training,
-            "attention_mask" : mask,
-            "token_type_ids" : tf.zeros_like(inputs)
+            "input_ids": inputs,
+            "training": training,
+            "attention_mask": mask,
+            "token_type_ids": tf.zeros_like(inputs)
         })
         if self.reduce_output == 'cls_pooled':
             hidden = transformer_outputs[1]
@@ -79,8 +82,8 @@ class BERTEncoder(Layer):
 
 
 class GPTEncoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -93,11 +96,11 @@ class GPTEncoder(Layer):
             reduce_output='sum',
             pretrained_model_name_or_path='openai-gpt',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(GPTEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFOpenAIGPTModel
         except ModuleNotFoundError:
             logger.error(
@@ -106,7 +109,7 @@ class GPTEncoder(Layer):
                 'pip install ludwig[text]'
             )
             sys.exit(-1)
-        
+
         self.transformer = TFOpenAIGPTModel.from_pretrained(
             pretrained_model_name_or_path
         )
@@ -115,13 +118,14 @@ class GPTEncoder(Layer):
         self.transformer.trainable = trainable
         self.transformer.resize_token_embeddings(num_tokens)
 
-
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            'input_ids' : inputs, 
-            'training' : training,
-            'attention_mask' : mask,
-            'token_type_ids' : tf.zeros_like(inputs)
+            'input_ids': inputs,
+            'training': training,
+            'attention_mask': mask,
+            'token_type_ids': tf.zeros_like(inputs)
         })
         hidden = transformer_outputs[0]
         hidden = self.reduce_sequence(hidden, self.reduce_output)
@@ -129,8 +133,8 @@ class GPTEncoder(Layer):
 
 
 class GPT2Encoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -143,11 +147,11 @@ class GPT2Encoder(Layer):
             pretrained_model_name_or_path='gpt2',
             reduce_output='sum',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(GPT2Encoder, self).__init__()
-        try: 
+        try:
             from transformers import TFGPT2Model
         except ModuleNotFoundError:
             logger.error(
@@ -165,13 +169,14 @@ class GPT2Encoder(Layer):
         self.transformer.trainable = trainable
         self.transformer.resize_token_embeddings(num_tokens)
 
-
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            "input_ids" : inputs, 
-            "training" : training,
-            "attention_mask" : mask,
-            "token_type_ids" : tf.zeros_like(inputs)
+            "input_ids": inputs,
+            "training": training,
+            "attention_mask": mask,
+            "token_type_ids": tf.zeros_like(inputs)
         })
         hidden = transformer_outputs[0]
         hidden = self.reduce_sequence(hidden, self.reduce_output)
@@ -179,8 +184,8 @@ class GPT2Encoder(Layer):
 
 
 class TransformerXLEncoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -196,7 +201,7 @@ class TransformerXLEncoder(Layer):
             **kwargs
     ):
         super(TransformerXLEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFTransfoXLModel
         except ModuleNotFoundError:
             logger.error(
@@ -213,10 +218,9 @@ class TransformerXLEncoder(Layer):
         self.reduce_sequence = SequenceReducer(reduce_mode=reduce_output)
         self.transformer.trainable = trainable
 
-
     def call(self, inputs, training=None, mask=None):
         transformer_outputs = self.transformer(
-            inputs, 
+            inputs,
             training=training,
         )
         hidden = transformer_outputs[0]
@@ -226,8 +230,8 @@ class TransformerXLEncoder(Layer):
 
 
 class XLNetEncoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -240,11 +244,11 @@ class XLNetEncoder(Layer):
             pretrained_model_name_or_path='xlnet-base-cased',
             reduce_output='sum',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(XLNetEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFXLNetModel
         except ModuleNotFoundError:
             logger.error(
@@ -253,7 +257,7 @@ class XLNetEncoder(Layer):
                 'pip install ludwig[text]'
             )
             sys.exit(-1)
-        
+
         self.transformer = TFXLNetModel.from_pretrained(
             pretrained_model_name_or_path
         )
@@ -263,11 +267,13 @@ class XLNetEncoder(Layer):
         self.transformer.resize_token_embeddings(num_tokens)
 
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            "input_ids" : inputs, 
-            "training" : training,
-            "attention_mask" : mask,
-            "token_type_ids" : tf.zeros_like(inputs)
+            "input_ids": inputs,
+            "training": training,
+            "attention_mask": mask,
+            "token_type_ids": tf.zeros_like(inputs)
         })
         hidden = transformer_outputs[0]
         hidden = self.reduce_sequence(hidden, self.reduce_output)
@@ -275,8 +281,8 @@ class XLNetEncoder(Layer):
 
 
 class XLMEncoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -289,11 +295,11 @@ class XLMEncoder(Layer):
             pretrained_model_name_or_path='xlm-mlm-en-2048',
             reduce_output='sum',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(XLMEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFXLMModel
         except ModuleNotFoundError:
             logger.error(
@@ -302,7 +308,7 @@ class XLMEncoder(Layer):
                 'pip install ludwig[text]'
             )
             sys.exit(-1)
-        
+
         self.transformer = TFXLMModel.from_pretrained(
             pretrained_model_name_or_path
         )
@@ -312,11 +318,13 @@ class XLMEncoder(Layer):
         self.transformer.resize_token_embeddings(num_tokens)
 
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            "input_ids" : inputs, 
-            "training" : training,
-            "attention_mask" : mask,
-            "token_type_ids" : tf.zeros_like(inputs)
+            "input_ids": inputs,
+            "training": training,
+            "attention_mask": mask,
+            "token_type_ids": tf.zeros_like(inputs)
         })
         hidden = transformer_outputs[0][:, 1:-1, :]  # bos + [sent] + sep
         hidden = self.reduce_sequence(hidden, self.reduce_output)
@@ -324,8 +332,8 @@ class XLMEncoder(Layer):
 
 
 class RoBERTaEncoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -338,11 +346,11 @@ class RoBERTaEncoder(Layer):
             pretrained_model_name_or_path='roberta-base',
             reduce_output='cls_pooled',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(RoBERTaEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFRobertaModel
         except ModuleNotFoundError:
             logger.error(
@@ -351,7 +359,7 @@ class RoBERTaEncoder(Layer):
                 'pip install ludwig[text]'
             )
             sys.exit(-1)
-        
+
         self.transformer = TFRobertaModel.from_pretrained(
             pretrained_model_name_or_path
         )
@@ -362,11 +370,13 @@ class RoBERTaEncoder(Layer):
         self.transformer.resize_token_embeddings(num_tokens)
 
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            "input_ids" : inputs, 
-            "training" : training,
-            "attention_mask" : mask,
-            "token_type_ids" : tf.zeros_like(inputs)
+            "input_ids": inputs,
+            "training": training,
+            "attention_mask": mask,
+            "token_type_ids": tf.zeros_like(inputs)
         })
         if self.reduce_output == 'cls_pooled':
             hidden = transformer_outputs[1]
@@ -377,8 +387,8 @@ class RoBERTaEncoder(Layer):
 
 
 class DistilBERTEncoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -389,13 +399,13 @@ class DistilBERTEncoder(Layer):
     def __init__(
             self,
             pretrained_model_name_or_path='distilbert-base-uncased',
-            reduce_output='cls_pooled',
+            reduce_output='sum',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(DistilBERTEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFDistilBertModel
         except ModuleNotFoundError:
             logger.error(
@@ -404,33 +414,31 @@ class DistilBERTEncoder(Layer):
                 'pip install ludwig[text]'
             )
             sys.exit(-1)
-        
+
         self.transformer = TFDistilBertModel.from_pretrained(
             pretrained_model_name_or_path
         )
         self.reduce_output = reduce_output
-        if not self.reduce_output == 'cls_pooled':
-            self.reduce_sequence = SequenceReducer(reduce_mode=reduce_output)
+        self.reduce_sequence = SequenceReducer(reduce_mode=reduce_output)
         self.transformer.trainable = trainable
         self.transformer.resize_token_embeddings(num_tokens)
 
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            "input_ids" : inputs, 
-            "training" : training,
-            "attention_mask" : mask
+            "input_ids": inputs,
+            "training": training,
+            "attention_mask": mask
         })
-        if self.reduce_output == 'cls_pooled':
-            hidden = transformer_outputs[1]
-        else:
-            hidden = transformer_outputs[0][:, 1:-1, :]
-            hidden = self.reduce_sequence(hidden, self.reduce_output)
+        hidden = transformer_outputs[0][:, 1:-1, :]
+        hidden = self.reduce_sequence(hidden, self.reduce_output)
         return {'encoder_output': hidden}
 
 
 class CTRLEncoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -443,11 +451,11 @@ class CTRLEncoder(Layer):
             pretrained_model_name_or_path='ctrl',
             reduce_output='sum',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(CTRLEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFCTRLModel
         except ModuleNotFoundError:
             logger.error(
@@ -466,11 +474,13 @@ class CTRLEncoder(Layer):
         self.transformer.resize_token_embeddings(num_tokens)
 
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            'input_ids' : inputs, 
-            'attention_mask' : mask,
-            'token_type_ids' : tf.zeros_like(inputs),
-            'training' : training,
+            'input_ids': inputs,
+            'attention_mask': mask,
+            'token_type_ids': tf.zeros_like(inputs),
+            'training': training,
         })
         hidden = transformer_outputs[0]
         hidden = self.reduce_sequence(hidden, self.reduce_output)
@@ -478,8 +488,8 @@ class CTRLEncoder(Layer):
 
 
 class CamemBERTEncoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -492,11 +502,11 @@ class CamemBERTEncoder(Layer):
             pretrained_model_name_or_path='jplu/tf-camembert-base',
             reduce_output='cls_pooled',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(CamemBERTEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFCamembertModel
         except ModuleNotFoundError:
             logger.error(
@@ -516,11 +526,13 @@ class CamemBERTEncoder(Layer):
         self.transformer.resize_token_embeddings(num_tokens)
 
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            "input_ids" : inputs, 
-            "training" : training,
-            "attention_mask" : mask,
-            "token_type_ids" : tf.zeros_like(inputs)
+            "input_ids": inputs,
+            "training": training,
+            "attention_mask": mask,
+            "token_type_ids": tf.zeros_like(inputs)
         })
         if self.reduce_output == 'cls_pooled':
             hidden = transformer_outputs[1]
@@ -531,8 +543,8 @@ class CamemBERTEncoder(Layer):
 
 
 class ALBERTEncoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -545,11 +557,11 @@ class ALBERTEncoder(Layer):
             pretrained_model_name_or_path='albert-base-v2',
             reduce_output='cls_pooled',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(ALBERTEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFAlbertModel
         except ModuleNotFoundError:
             logger.error(
@@ -569,11 +581,13 @@ class ALBERTEncoder(Layer):
         self.transformer.resize_token_embeddings(num_tokens)
 
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            "input_ids" : inputs, 
-            "training" : training,
-            "attention_mask" : mask,
-            "token_type_ids" : tf.zeros_like(inputs)
+            "input_ids": inputs,
+            "training": training,
+            "attention_mask": mask,
+            "token_type_ids": tf.zeros_like(inputs)
         })
         if self.reduce_output == 'cls_pooled':
             hidden = transformer_outputs[1]
@@ -584,25 +598,25 @@ class ALBERTEncoder(Layer):
 
 
 class T5Encoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
     default_params = {
         'pretrained_model_name_or_path': 't5-small',
     }
-    
+
     def __init__(
             self,
             pretrained_model_name_or_path='t5-small',
             reduce_output='sum',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(T5Encoder, self).__init__()
-        try: 
+        try:
             from transformers import TFT5Model
         except ModuleNotFoundError:
             logger.error(
@@ -621,21 +635,23 @@ class T5Encoder(Layer):
         self.transformer.resize_token_embeddings(num_tokens)
 
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer(
-            inputs, 
-            decoder_input_ids = inputs,
+            inputs,
+            decoder_input_ids=inputs,
             training=training,
             attention_mask=mask,
             token_type_ids=tf.zeros_like(inputs)
         )
-        hidden = transformer_outputs[0][:, 0:-1, :] # [sent] + [eos token]
+        hidden = transformer_outputs[0][:, 0:-1, :]  # [sent] + [eos token]
         hidden = self.reduce_sequence(hidden, self.reduce_output)
         return {'encoder_output': hidden}
 
 
 class XLMRoBERTaEncoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -648,11 +664,11 @@ class XLMRoBERTaEncoder(Layer):
             pretrained_model_name_or_path='jplu/tf-xlm-roberta-base',
             reduce_output='cls_pooled',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(XLMRoBERTaEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFXLMRobertaModel
         except ModuleNotFoundError:
             logger.error(
@@ -672,11 +688,13 @@ class XLMRoBERTaEncoder(Layer):
         self.transformer.resize_token_embeddings(num_tokens)
 
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            "input_ids" : inputs, 
-            "training" : training,
-            "attention_mask" : mask,
-            "token_type_ids" : tf.zeros_like(inputs)
+            "input_ids": inputs,
+            "training": training,
+            "attention_mask": mask,
+            "token_type_ids": tf.zeros_like(inputs)
         })
         if self.reduce_output == 'cls_pooled':
             hidden = transformer_outputs[1]
@@ -687,8 +705,8 @@ class XLMRoBERTaEncoder(Layer):
 
 
 class FlauBERTEncoder(Layer):
-
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -699,13 +717,13 @@ class FlauBERTEncoder(Layer):
     def __init__(
             self,
             pretrained_model_name_or_path='jplu/tf-flaubert-base-uncased',
-            reduce_output='cls_pooled',
+            reduce_output='sum',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(FlauBERTEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFFlaubertModel
         except ModuleNotFoundError:
             logger.error(
@@ -719,29 +737,27 @@ class FlauBERTEncoder(Layer):
             pretrained_model_name_or_path
         )
         self.reduce_output = reduce_output
-        if not self.reduce_output == 'cls_pooled':
-            self.reduce_sequence = SequenceReducer(reduce_mode=reduce_output)
+        self.reduce_sequence = SequenceReducer(reduce_mode=reduce_output)
         self.transformer.trainable = trainable
         self.transformer.resize_token_embeddings(num_tokens)
 
-
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            'input_ids' : inputs, 
-            'training' : training,
-            'attention_mask' : mask,
-            'token_type_ids' : tf.zeros_like(inputs)
+            'input_ids': inputs,
+            'training': training,
+            'attention_mask': mask,
+            'token_type_ids': tf.zeros_like(inputs)
         })
-        if self.reduce_output == 'cls_pooled':
-            hidden = transformer_outputs[1]
-        else:
-            hidden = transformer_outputs[0][:, 1:-1, :]
-            hidden = self.reduce_sequence(hidden, self.reduce_output)
+        hidden = transformer_outputs[0][:, 1:-1, :]
+        hidden = self.reduce_sequence(hidden, self.reduce_output)
         return {'encoder_output': hidden}
 
-class ELECTRAEncoder(Layer):
 
+class ELECTRAEncoder(Layer):
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -754,11 +770,11 @@ class ELECTRAEncoder(Layer):
             pretrained_model_name_or_path='google/electra-small-discriminator',
             reduce_output='sum',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(ELECTRAEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFElectraModel
         except ModuleNotFoundError:
             logger.error(
@@ -777,19 +793,22 @@ class ELECTRAEncoder(Layer):
         self.transformer.resize_token_embeddings(num_tokens)
 
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            "input_ids" : inputs, 
-            "training" : training,
-            "attention_mask" : mask,
-            "token_type_ids" : tf.zeros_like(inputs)
+            "input_ids": inputs,
+            "training": training,
+            "attention_mask": mask,
+            "token_type_ids": tf.zeros_like(inputs)
         })
         hidden = transformer_outputs[0][:, 1:-1, :]
         hidden = self.reduce_sequence(hidden, self.reduce_output)
         return {'encoder_output': hidden}
 
-class LongformerEncoder(Layer):
 
+class LongformerEncoder(Layer):
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -802,11 +821,11 @@ class LongformerEncoder(Layer):
             pretrained_model_name_or_path='allenai/longformer-base-4096',
             reduce_output='cls_pooled',
             trainable=False,
-            num_tokens = None,
+            num_tokens=None,
             **kwargs
     ):
         super(LongformerEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFLongformerModel
         except ModuleNotFoundError:
             logger.error(
@@ -815,7 +834,7 @@ class LongformerEncoder(Layer):
                 'pip install ludwig[text]'
             )
             sys.exit(-1)
-        
+
         self.transformer = TFLongformerModel.from_pretrained(
             pretrained_model_name_or_path
         )
@@ -826,11 +845,13 @@ class LongformerEncoder(Layer):
         self.transformer.resize_token_embeddings(num_tokens)
 
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            "input_ids" : inputs, 
-            "training" : training,
-            "attention_mask" : mask,
-            "token_type_ids" : tf.zeros_like(inputs)
+            "input_ids": inputs,
+            "training": training,
+            "attention_mask": mask,
+            "token_type_ids": tf.zeros_like(inputs)
         })
         if self.reduce_output == 'cls_pooled':
             hidden = transformer_outputs[1]
@@ -839,9 +860,10 @@ class LongformerEncoder(Layer):
             hidden = self.reduce_sequence(hidden, self.reduce_output)
         return {'encoder_output': hidden}
 
-class AutoTransformerEncoder(Layer):
 
+class AutoTransformerEncoder(Layer):
     fixed_preprocessing_parameters = {
+        'word_tokenizer': 'hf_tokenizer',
         'pretrained_model_name_or_path': 'feature.pretrained_model_name_or_path',
     }
 
@@ -850,12 +872,11 @@ class AutoTransformerEncoder(Layer):
             pretrained_model_name_or_path,
             reduce_output='sum',
             trainable=False,
-            num_tokens = None,
-            pooler_output = None,
+            num_tokens=None,
             **kwargs
     ):
         super(AutoTransformerEncoder, self).__init__()
-        try: 
+        try:
             from transformers import TFAutoModel
         except ModuleNotFoundError:
             logger.error(
@@ -873,21 +894,22 @@ class AutoTransformerEncoder(Layer):
             self.reduce_sequence = SequenceReducer(reduce_mode=reduce_output)
         self.transformer.trainable = trainable
         self.transformer.resize_token_embeddings(num_tokens)
-        self.pooler_output_idx = pooler_output
 
     def call(self, inputs, training=None, mask=None):
+        if mask is not None:
+            mask = tf.cast(mask, dtype=tf.int32)
         transformer_outputs = self.transformer({
-            "input_ids" : inputs, 
-            "training" : training,
-            "attention_mask" : mask,
-            "token_type_ids" : tf.zeros_like(inputs)
-        })
-        if self.reduce_output == 'cls_pooled' and self.pooler_output_idx is not None:
+            "input_ids": inputs,
+            "training": training,
+            "attention_mask": mask,
+            "token_type_ids": tf.zeros_like(inputs)
+        }, return_dict=True)
+        if self.reduce_output == 'cls_pooled':
             # this works only if the user know that the specific model
             # they want to use has the same outputs of
             # the BERT base class call() function
-            hidden = transformer_outputs[self.pooler_output_idx]
+            hidden = transformer_outputs['cls_pooled']
         else:
-            hidden = transformer_outputs[0]
+            hidden = transformer_outputs['last_hidden_state']
             hidden = self.reduce_sequence(hidden, self.reduce_output)
         return {'encoder_output': hidden}

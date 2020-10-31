@@ -51,14 +51,15 @@ def run(csv_filename):
     output_features = [category_feature()]
     data_csv = generate_data(input_features, output_features, csv_filename)
 
-    model_definition = {
+    config = {
         'input_features': input_features,
         'output_features': output_features,
         'combiner': {'type': 'concat', 'fc_size': 14},
         'training': {'epochs': 2}
     }
 
-    model = LudwigModel(model_definition)
+    model = LudwigModel(config)
+    output_dir = None
 
     # Wrap these methods so we can check that they were called
     comet_instance.train_init = Mock(side_effect=comet_instance.train_init)
@@ -67,11 +68,11 @@ def run(csv_filename):
     with patch('comet_ml.Experiment.log_asset_data') as mock_log_asset_data:
         try:
             # Training with csv
-            model.train(data_csv=data_csv)
-            model.predict(data_csv=data_csv)
+            _, _, output_dir = model.train(dataset=data_csv)
+            model.predict(dataset=data_csv)
         finally:
-            if model.exp_dir_name:
-                shutil.rmtree(model.exp_dir_name, ignore_errors=True)
+            if output_dir:
+                shutil.rmtree(output_dir, ignore_errors=True)
 
     # Verify that the experiment was created successfully
     assert comet_instance.cometml_experiment is not None

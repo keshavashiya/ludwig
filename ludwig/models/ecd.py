@@ -22,8 +22,12 @@ class ECD(tf.keras.Model):
             input_features_def,
             combiner_def,
             output_features_def,
+            random_seed=None,
             **kwargs
     ):
+        if random_seed is not None:
+            tf.random.set_seed(random_seed)
+
         super().__init__()
 
         # ================ Inputs ================
@@ -55,7 +59,8 @@ class ECD(tf.keras.Model):
     def get_model_inputs(self, training=True):
         inputs = {
             input_feature_name: input_feature.create_input()
-            for input_feature_name, input_feature in self.input_features.items()
+            for input_feature_name, input_feature in
+            self.input_features.items()
         }
 
         if not training:
@@ -63,7 +68,8 @@ class ECD(tf.keras.Model):
 
         targets = {
             output_feature_name: output_feature.create_input()
-            for output_feature_name, output_feature in self.output_features.items()
+            for output_feature_name, output_feature in
+            self.output_features.items()
         }
         return inputs, targets
 
@@ -71,6 +77,10 @@ class ECD(tf.keras.Model):
         inputs = inputs or self.get_model_inputs(training)
         outputs = self.call(inputs)
         return tf.keras.Model(inputs=inputs, outputs=outputs)
+
+    def save_savedmodel(self, save_path):
+        keras_model = self.get_connected_model(training=False)
+        keras_model.save(save_path)
 
     def call(self, inputs, training=None, mask=None):
         # parameter inputs is a dict feature_name -> tensor / ndarray
@@ -111,18 +121,6 @@ class ECD(tf.keras.Model):
                 mask=mask
             )
             output_logits[output_feature_name] = decoder_outputs
-            # output_logits[output_feature_name][LOGITS] = decoder_logits
-            # output_logits[output_feature_name][
-            #    LAST_HIDDEN] = decoder_last_hidden
-
-            # todo Piero: not sure this is needed,
-            #  if combiner had lengths and the decoder wants to return them
-            #  the decoder should do it, otherwise
-            #  this can override the decoder outputs
-            # if LENGTHS in combiner_outputs:
-            #    output_logits[output_feature_name][LENGTHS] = \
-            #        combiner_outputs[LENGTHS]
-
             output_last_hidden[output_feature_name] = decoder_outputs[
                 'last_hidden']
 
@@ -241,6 +239,38 @@ class ECD(tf.keras.Model):
             of_obj.reset_metrics()
         self.eval_loss_metric.reset_states()
 
+    def collect_weights(
+            self,
+            tensor_names=None,
+            **kwargs
+    ):
+        def recurse_weights(model, prefix=None):
+            results = []
+            for layer in model.layers:
+                layer_prefix = f'{prefix}/{layer.name}' if prefix else layer.name
+                if isinstance(layer, tf.keras.Model):
+                    results += recurse_weights(layer, layer_prefix)
+                else:
+                    results += [(f'{layer_prefix}/{w.name}', w) for w in
+                                layer.weights]
+            return results
+
+        connected_model = self.get_connected_model()
+        weights = recurse_weights(connected_model)
+        if tensor_names:
+            # Check for bad tensor names
+            weight_set = set(name for name, w in weights)
+            for name in tensor_names:
+                if name not in weight_set:
+                    raise ValueError(
+                        f'Tensor {name} not present in the model graph')
+
+            # Filter the weights
+            tensor_set = set(tensor_names)
+            weights = [(name, w) for name, w in weights if name in tensor_set]
+
+        return weights
+
 
 def build_inputs(
         input_features_def,
@@ -250,7 +280,7 @@ def build_inputs(
     input_features_def = topological_sort_feature_dependencies(
         input_features_def)
     for input_feature_def in input_features_def:
-        input_features[input_feature_def['name']] = build_single_input(
+        input_features[input_feature_def[NAME]] = build_single_input(
             input_feature_def,
             input_features,
             **kwargs
@@ -261,7 +291,7 @@ def build_inputs(
 def build_single_input(input_feature_def, other_input_features, **kwargs):
     logger.debug('Input {} feature {}'.format(
         input_feature_def[TYPE],
-        input_feature_def['name']
+        input_feature_def[NAME]
     ))
 
     encoder_obj = None
@@ -302,7 +332,7 @@ def build_outputs(
             output_features,
             **kwargs
         )
-        output_features[output_feature_def['name']] = output_feature
+        output_features[output_feature_def[NAME]] = output_feature
 
     return output_features
 
@@ -315,7 +345,7 @@ def build_single_output(
 ):
     logger.debug('Output {} feature {}'.format(
         output_feature_def[TYPE],
-        output_feature_def['name']
+        output_feature_def[NAME]
     ))
 
     output_feature_class = get_from_registry(

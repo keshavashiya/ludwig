@@ -13,16 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-
 import contextlib
 
 import pytest
-
 import tensorflow as tf
+import tensorflow_addons as tfa
 
 from tests.integration_tests.utils import category_feature
 from tests.integration_tests.utils import generate_data
-from tests.integration_tests.utils import generate_output_features_with_dependencies
+from tests.integration_tests.utils import \
+    generate_output_features_with_dependencies
 from tests.integration_tests.utils import numerical_feature
 from tests.integration_tests.utils import run_experiment
 from tests.integration_tests.utils import sequence_feature
@@ -60,7 +60,8 @@ def graph_mode():
         # Generator decoder and reduce_input = None
         [
             category_feature(vocab_size=2, reduce_input='sum'),
-            sequence_feature(max_len=5, decoder='generator', reduce_input=None),
+            sequence_feature(max_len=5, decoder='generator',
+                             reduce_input=None),
             numerical_feature(normalization='minmax')
         ],
 
@@ -83,7 +84,7 @@ def test_experiment_multiple_seq_seq(csv_filename, output_features):
         output_features = output_features
 
         rel_path = generate_data(input_features, output_features, csv_filename)
-        run_experiment(input_features, output_features, data_csv=rel_path)
+        run_experiment(input_features, output_features, dataset=rel_path)
 
 
 @pytest.mark.parametrize('dec_beam_width', [3])
@@ -99,6 +100,8 @@ def test_sequence_generator(
         dec_beam_width,
         csv_filename
 ):
+    tfa.options.TF_ADDONS_PY_OPS = True
+
     with graph_mode():
         # Define input and output features
         input_features = [
@@ -134,4 +137,4 @@ def test_sequence_generator(
         output_features[0]['beam_width'] = dec_beam_width
 
         # run the experiment
-        run_experiment(input_features, output_features, data_csv=rel_path)
+        run_experiment(input_features, output_features, dataset=rel_path)

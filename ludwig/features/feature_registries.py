@@ -14,7 +14,7 @@
 # limitations under the License.
 # ==============================================================================
 from ludwig.constants import BAG, BINARY, CATEGORY, DATE, H3, IMAGE, NUMERICAL, \
-    SEQUENCE, SET, TEXT, TIMESERIES, VECTOR, AUDIO
+    SEQUENCE, SET, TEXT, TIMESERIES, VECTOR, AUDIO, TYPE, NAME
 from ludwig.features.audio_feature import AudioFeatureMixin, AudioInputFeature
 from ludwig.features.bag_feature import BagFeatureMixin, BagInputFeature
 from ludwig.features.binary_feature import BinaryFeatureMixin, \
@@ -36,6 +36,7 @@ from ludwig.features.timeseries_feature import TimeseriesFeatureMixin, \
     TimeseriesInputFeature
 from ludwig.features.vector_feature import VectorFeatureMixin, \
     VectorInputFeature, VectorOutputFeature
+from ludwig.utils.misc_utils import get_from_registry
 
 base_type_registry = {
     TEXT: TextFeatureMixin,
@@ -76,3 +77,41 @@ output_type_registry = {
     TEXT: TextOutputFeature,
     VECTOR: VectorOutputFeature
 }
+
+
+def update_config_with_metadata(config,
+                                training_set_metadata):
+    # populate input features fields depending on data
+    # config = merge_with_defaults(config)
+    for input_feature in config['input_features']:
+        feature = get_from_registry(
+            input_feature[TYPE],
+            input_type_registry
+        )
+        feature.populate_defaults(input_feature)
+        feature.update_config_with_metadata(
+            input_feature,
+            training_set_metadata[input_feature[NAME]],
+            config=config
+        )
+
+    # populate output features fields depending on data
+    for output_feature in config['output_features']:
+        feature = get_from_registry(
+            output_feature[TYPE],
+            output_type_registry
+        )
+        feature.populate_defaults(output_feature)
+        feature.update_config_with_metadata(
+            output_feature,
+            training_set_metadata[output_feature[NAME]]
+        )
+
+    for feature in (
+            config['input_features'] +
+            config['output_features']
+    ):
+        if 'preprocessing' in feature:
+            feature['preprocessing'] = training_set_metadata[feature[NAME]][
+                'preprocessing'
+            ]

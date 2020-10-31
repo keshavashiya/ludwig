@@ -21,7 +21,7 @@ import numpy as np
 from ludwig.constants import *
 from ludwig.decoders.sequence_decoders import SequenceGeneratorDecoder
 from ludwig.decoders.sequence_decoders import SequenceTaggerDecoder
-from ludwig.encoders.sequence_encoders import ParallelCNN
+from ludwig.encoders.sequence_encoders import ParallelCNN, StackedTransformer
 from ludwig.encoders.sequence_encoders import SequenceEmbedEncoder
 from ludwig.encoders.sequence_encoders import SequencePassthroughEncoder
 from ludwig.encoders.sequence_encoders import StackedCNN
@@ -31,14 +31,15 @@ from ludwig.encoders.sequence_encoders import StackedRNN
 from ludwig.encoders.text_encoders import *
 from ludwig.features.base_feature import InputFeature
 from ludwig.features.base_feature import OutputFeature
-from ludwig.globals import is_on_master
 from ludwig.modules.loss_modules import SampledSoftmaxCrossEntropyLoss
 from ludwig.modules.loss_modules import SequenceLoss
-from ludwig.modules.metric_modules import EditDistanceMetric
+from ludwig.modules.metric_modules import EditDistanceMetric, \
+    SequenceAccuracyMetric
 from ludwig.modules.metric_modules import PerplexityMetric
 from ludwig.modules.metric_modules import SequenceLastAccuracyMetric
 from ludwig.modules.metric_modules import SequenceLossMetric
 from ludwig.modules.metric_modules import TokenAccuracyMetric
+from ludwig.utils.horovod_utils import is_on_master
 from ludwig.utils.math_utils import softmax
 from ludwig.utils.metrics_utils import ConfusionMatrix
 from ludwig.utils.misc_utils import set_default_value
@@ -110,14 +111,14 @@ class SequenceFeatureMixin(object):
     def add_feature_data(
             feature,
             dataset_df,
-            data,
+            dataset,
             metadata,
             preprocessing_parameters
     ):
         sequence_data = SequenceInputFeature.feature_data(
-            dataset_df[feature['name']].astype(str),
-            metadata[feature['name']], preprocessing_parameters)
-        data[feature['name']] = sequence_data
+            dataset_df[feature[NAME]].astype(str),
+            metadata[feature[NAME]], preprocessing_parameters)
+        dataset[feature[NAME]] = sequence_data
 
 
 class SequenceInputFeature(SequenceFeatureMixin, InputFeature):
@@ -131,7 +132,6 @@ class SequenceInputFeature(SequenceFeatureMixin, InputFeature):
             self.encoder_obj = encoder_obj
         else:
             self.encoder_obj = self.initialize_encoder(feature)
-
 
     def call(self, inputs, training=None, mask=None):
         assert isinstance(inputs, tf.Tensor)
@@ -155,7 +155,7 @@ class SequenceInputFeature(SequenceFeatureMixin, InputFeature):
         return None,
 
     @staticmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             input_feature,
             feature_metadata,
             *args,
@@ -176,6 +176,7 @@ class SequenceInputFeature(SequenceFeatureMixin, InputFeature):
         'stacked_parallel_cnn': StackedParallelCNN,
         'rnn': StackedRNN,
         'cnnrnn': StackedCNNRNN,
+        'transformer': StackedTransformer,
         'embed': SequenceEmbedEncoder,
         'passthrough': SequencePassthroughEncoder,
         'null': SequencePassthroughEncoder,
@@ -188,7 +189,8 @@ class SequenceInputFeature(SequenceFeatureMixin, InputFeature):
 class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
     decoder = 'generator'
     loss = {TYPE: SOFTMAX_CROSS_ENTROPY}
-    metric_functions = {LOSS: None, TOKEN_ACCURACY: None, LAST_ACCURACY: None,
+    metric_functions = {LOSS: None, TOKEN_ACCURACY: None,
+                        SEQUENCE_ACCURACY: None, LAST_ACCURACY: None,
                         PERPLEXITY: None, EDIT_DISTANCE: None}
     default_validation_metric = LOSS
     max_sequence_length = 0
@@ -221,8 +223,10 @@ class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
         self.eval_loss_function = SequenceLossMetric()
 
     def _setup_metrics(self):
+        self.metric_functions = {}  # needed to shadow class variable
         self.metric_functions[LOSS] = self.eval_loss_function
         self.metric_functions[TOKEN_ACCURACY] = TokenAccuracyMetric()
+        self.metric_functions[SEQUENCE_ACCURACY] = SequenceAccuracyMetric()
         self.metric_functions[LAST_ACCURACY] = SequenceLastAccuracyMetric()
         self.metric_functions[PERPLEXITY] = PerplexityMetric()
         self.metric_functions[EDIT_DISTANCE] = EditDistanceMetric()
@@ -263,7 +267,7 @@ class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
         return self.max_sequence_length,
 
     @staticmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             output_feature,
             feature_metadata,
             *args,
@@ -284,7 +288,7 @@ class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
                     'for the <UNK> and <PAD> class too.'.format(
                         len(output_feature[LOSS]['class_weights']),
                         output_feature['num_classes'],
-                        output_feature['name']
+                        output_feature[NAME]
                     )
                 )
 
@@ -311,7 +315,7 @@ class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
                                 'the first row {}. All rows must have '
                                 'the same length.'.format(
                                     curr_row,
-                                    output_feature['name'],
+                                    output_feature[NAME],
                                     curr_row_length,
                                     first_row_length
                                 )
@@ -325,7 +329,7 @@ class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
                         'The class_similarities matrix of {} has '
                         '{} rows and {} columns, '
                         'their number must be identical.'.format(
-                            output_feature['name'],
+                            output_feature[NAME],
                             len(similarities),
                             all_rows_length
                         )
@@ -338,7 +342,7 @@ class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
                         'Check the metadata JSON file to see the classes '
                         'and their order and '
                         'consider <UNK> and <PAD> class too.'.format(
-                            output_feature['name'],
+                            output_feature[NAME],
                             all_rows_length,
                             output_feature['num_classes']
                         )
@@ -355,7 +359,7 @@ class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
                 raise ValueError(
                     'class_similarities_temperature > 0, '
                     'but no class_similarities are provided '
-                    'for feature {}'.format(output_feature['name'])
+                    'for feature {}'.format(output_feature[NAME])
                 )
 
         if output_feature[LOSS][TYPE] == 'sampled_softmax_cross_entropy':
@@ -366,51 +370,51 @@ class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
 
     @staticmethod
     def calculate_overall_stats(
-            test_stats,
-            output_feature,
-            dataset,
+            predictions,
+            targets,
             train_set_metadata
     ):
-        feature_name = output_feature['name']
-        sequences = dataset.get(feature_name)
+        overall_stats = {}
+        sequences = targets
         last_elem_sequence = sequences[np.arange(sequences.shape[0]),
                                        (sequences != 0).cumsum(1).argmax(1)]
-        stats = test_stats[feature_name]
         confusion_matrix = ConfusionMatrix(
             last_elem_sequence,
-            stats[LAST_PREDICTIONS],
-            labels=train_set_metadata[feature_name]['idx2str']
+            predictions[LAST_PREDICTIONS],
+            labels=train_set_metadata['idx2str']
         )
-        stats['confusion_matrix'] = confusion_matrix.cm.tolist()
-        stats['overall_stats'] = confusion_matrix.stats()
-        stats['per_class_stats'] = confusion_matrix.per_class_stats()
+        overall_stats['confusion_matrix'] = confusion_matrix.cm.tolist()
+        overall_stats['overall_stats'] = confusion_matrix.stats()
+        overall_stats['per_class_stats'] = confusion_matrix.per_class_stats()
 
-    @staticmethod
-    def postprocess_results(
-            output_feature,
+        return overall_stats
+
+    def postprocess_predictions(
+            self,
             result,
             metadata,
-            experiment_dir_name,
+            output_directory,
             skip_save_unprocessed_output=False,
     ):
         postprocessed = {}
-        name = output_feature['name']
+        name = self.feature_name
 
         npy_filename = None
         if is_on_master():
-            npy_filename = os.path.join(experiment_dir_name, '{}_{}.npy')
+            npy_filename = os.path.join(output_directory, '{}_{}.npy')
         else:
             skip_save_unprocessed_output = True
 
         if PREDICTIONS in result and len(result[PREDICTIONS]) > 0:
-            preds = result[PREDICTIONS]
+            preds = result[PREDICTIONS].numpy()
             lengths = result[LENGTHS]
             if 'idx2str' in metadata:
                 postprocessed[PREDICTIONS] = [
                     [metadata['idx2str'][token]
                      if token < len(metadata['idx2str']) else UNKNOWN_SYMBOL
                      for token in [pred[i] for i in range(length)]]
-                    for pred, length in [(preds[j], lengths[j]) for j in range(len(preds))]
+                    for pred, length in
+                    [(preds[j], lengths[j]) for j in range(len(preds))]
                 ]
             else:
                 postprocessed[PREDICTIONS] = preds
@@ -421,7 +425,7 @@ class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
             del result[PREDICTIONS]
 
         if LAST_PREDICTIONS in result and len(result[LAST_PREDICTIONS]) > 0:
-            last_preds = result[LAST_PREDICTIONS]
+            last_preds = result[LAST_PREDICTIONS].numpy()
             if 'idx2str' in metadata:
                 postprocessed[LAST_PREDICTIONS] = [
                     metadata['idx2str'][last_pred]
@@ -477,7 +481,7 @@ class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
             output_feature,
             LOSS,
             {
-                'type': 'softmax_cross_entropy',
+                TYPE: 'softmax_cross_entropy',
                 'sampler': None,
                 'negative_samples': 0,
                 'distortion': 1,
@@ -489,7 +493,7 @@ class SequenceOutputFeature(SequenceFeatureMixin, OutputFeature):
                 'weight': 1
             }
         )
-        set_default_value(output_feature[LOSS], 'type',
+        set_default_value(output_feature[LOSS], TYPE,
                           'softmax_cross_entropy')
         set_default_value(output_feature[LOSS], 'labels_smoothing', 0)
         set_default_value(output_feature[LOSS], 'class_weights', 1)

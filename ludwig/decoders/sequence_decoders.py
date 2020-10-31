@@ -25,6 +25,7 @@ from tensorflow_addons.seq2seq import BahdanauAttention
 from tensorflow_addons.seq2seq import LuongAttention
 
 from ludwig.constants import *
+from ludwig.modules.attention_modules import MultiHeadSelfAttention
 from ludwig.modules.reduction_modules import SequenceReducer
 from ludwig.utils.misc_utils import get_from_registry
 from ludwig.utils.tf_utils import sequence_length_3D, sequence_length_2D
@@ -179,7 +180,7 @@ class SequenceGeneratorDecoder(Layer):
                 # if it is bidirectional gru / rnn, the output of one of
                 # the directions will be treated as the inital c of the lstm
                 # which is weird and may lead to poor performance
-                # todo try to find a way to distinguish among these two cases
+                # todo future: try to find a way to distinguish among these two cases
                 pass
             elif len(encoder_output_state) == 4:
                 # the encoder was a bidirectional lstm
@@ -297,7 +298,7 @@ class SequenceGeneratorDecoder(Layer):
             end_tokens = tf.cast(end_tokens, tf.float32)
         targets_with_go_and_eos = tf.concat([
             tf.expand_dims(start_tokens, 1),
-            target,  # todo tf2: right now cast to tf.int32, fails if tf.int64
+            target,  # right now cast to tf.int32, fails if tf.int64
             tf.expand_dims(end_tokens, 1)], 1)
         target_sequence_length_with_eos = target_sequence_length + 1
 
@@ -701,6 +702,8 @@ class SequenceTaggerDecoder(Layer):
             bias_regularizer=None,
             activity_regularizer=None,
             attention=False,
+            attention_embedding_size=256,
+            attention_num_heads=8,
             is_timeseries=False,
             **kwargs
     ):
@@ -708,6 +711,12 @@ class SequenceTaggerDecoder(Layer):
         logger.debug(' {}'.format(self.name))
 
         self.attention = attention
+        if attention:
+            logger.debug('  MultiHeadSelfAttention')
+            self.self_attention = MultiHeadSelfAttention(
+                hidden_size=attention_embedding_size,
+                num_heads=attention_num_heads
+            )
 
         if is_timeseries:
             num_classes = 1
@@ -740,7 +749,8 @@ class SequenceTaggerDecoder(Layer):
                 'Consider setting reduce_output to null / None if a sequential encoder / combiner is used.'.format(
                     len(hidden.shape)))
 
-        # TODO tf2 add feed forward attention
+        if self.attention:
+            hidden = self.self_attention(hidden, training=training, mask=mask)
 
         # hidden shape [batch_size, sequence_length, hidden_size]
         logits = self.projection_layer(hidden)
@@ -783,7 +793,6 @@ class SequenceTaggerDecoder(Layer):
             output_type=tf.int64
         )
 
-        # todo tf2: deal with spurious 0s in predictions
         # generated_sequence_lengths = sequence_length_2D(predictions)
         last_predictions = tf.gather_nd(
             predictions,

@@ -67,30 +67,30 @@ InputFeatureOptions = namedtuple('InputFeatureOptions',
     ]
 )
 def test_tied_micro_level(input_feature_options):
-    # build input feature definition
-    input_feature_definitions = []
+    # build input feature config
+    input_feature_configs = []
 
-    input_feature_definitions.append({
+    input_feature_configs.append({
         'name': 'input_feature_1',
         'type': input_feature_options.feature_type
     })
     if input_feature_options.feature_options is not None:
-        input_feature_definitions[0].update(
+        input_feature_configs[0].update(
             input_feature_options.feature_options)
 
-    input_feature_definitions.append({
+    input_feature_configs.append({
         'name': 'input_feature_2',
         'type': input_feature_options.feature_type
     })
     if input_feature_options.feature_options is not None:
-        input_feature_definitions[1].update(
+        input_feature_configs[1].update(
             input_feature_options.feature_options)
 
     # add tied option to the second feature
     if input_feature_options.tie_features:
-        input_feature_definitions[1]['tied'] = 'input_feature_1'
+        input_feature_configs[1]['tied'] = 'input_feature_1'
 
-    input_features = build_inputs(input_feature_definitions)
+    input_features = build_inputs(input_feature_configs)
 
     if input_feature_options.tie_features:
         # should be same encoder
@@ -117,7 +117,7 @@ TiedUseCase = namedtuple('TiedUseCase', 'input_feature output_feature')
         TiedUseCase(sequence_feature, sequence_feature)
     ]
 )
-def test_tied_macro_level(tied_use_case, csv_filename):
+def test_tied_macro_level(tied_use_case: TiedUseCase, csv_filename: str):
     input_features = [
         numerical_feature(),  # Other feature
         tied_use_case.input_feature(),  # first feature to be tied
@@ -134,4 +134,4 @@ def test_tied_macro_level(tied_use_case, csv_filename):
 
     # Generate test data and run full_experiment
     rel_path = generate_data(input_features, output_features, csv_filename)
-    run_experiment(input_features, output_features, data_csv=rel_path)
+    run_experiment(input_features, output_features, dataset=rel_path)

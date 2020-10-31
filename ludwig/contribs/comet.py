@@ -13,11 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-
 import logging
 import os
 from datetime import datetime
-
 
 logger = logging.getLogger(__name__)
 
@@ -111,32 +109,32 @@ class Comet():
         config = comet_ml.get_config()
         self._save_config(config, directory=experiment_directory)
 
-    def train_model(self, model, model_definition, model_definition_path,
+    def train_model(self, model, config, config_path,
                     *args, **kwargs):
         logger.info("comet.train_model() called......")
         if self.cometml_experiment:
-            # TODO tf2: currently no clear way to set model graph
+            # todo v0.4: currently not clear way to set model graph
             # see: https://github.com/comet-ml/issue-tracking/issues/296
             # if model:
             #     self.cometml_experiment.set_model_graph(
             #         str(model._graph.as_graph_def()))
 
-            if model_definition:
-                if model_definition_path:
-                    base_name = os.path.basename(model_definition_path)
+            if config:
+                if config_path:
+                    base_name = os.path.basename(config_path)
                 else:
-                    base_name = "model_definition.yaml"
+                    base_name = "config.yaml"
                 if "." in base_name:
                     base_name = base_name.rsplit(".", 1)[0] + ".json"
                 else:
                     base_name = base_name + ".json"
-                self.cometml_experiment.log_asset_data(model_definition,
+                self.cometml_experiment.log_asset_data(config,
                                                        base_name)
 
-    def train_save(self, experiment_dir_name, *args, **kwargs):
+    def train_save(self, output_directory, *args, **kwargs):
         logger.info("comet.train_save() called......")
         if self.cometml_experiment:
-            self.cometml_experiment.log_asset_folder(experiment_dir_name)
+            self.cometml_experiment.log_asset_folder(output_directory)
 
     def train_epoch_end(self, progress_tracker):
         """
@@ -148,7 +146,8 @@ class Comet():
                               "last_improvement_epoch",
                               "learning_rate", "best_valid_metric",
                               "num_reductions_lr",
-                              "num_increases_bs", "train_metrics", "vali_metrics",
+                              "num_increases_bs", "train_metrics",
+                              "vali_metrics",
                               "test_metrics"]:
                 try:
                     item = getattr(progress_tracker, item_name)
@@ -165,13 +164,14 @@ class Comet():
                     elif item is not None:
                         self.cometml_experiment.log_metric(item_name, item)
                 except Exception:
-                    logger.info("comet.train_epoch_end() skip logging '%s'", item_name)
+                    logger.info("comet.train_epoch_end() skip logging '%s'",
+                                item_name)
 
     def experiment_save(self, *args, **kwargs):
         logger.info("comet.experiment_save() called......")
-        experiment_dir_name = args[0]
+        output_directory = args[0]
         if self.cometml_experiment:
-            self.cometml_experiment.log_asset_folder(experiment_dir_name)
+            self.cometml_experiment.log_asset_folder(output_directory)
 
     def visualize(self, *args, **kwargs):
         import comet_ml
@@ -204,7 +204,7 @@ class Comet():
         cli = self._make_command_line(args)
         self._log_html(cli)
 
-    def test(self, *args, **kwargs):
+    def evaluate(self, *args, **kwargs):
         import comet_ml
         try:
             self.cometml_experiment = comet_ml.ExistingExperiment()
@@ -213,7 +213,7 @@ class Comet():
             logger.error("Ignored --comet. No '.comet.config' file")
             return
 
-        logger.info("comet.test() called......")
+        logger.info("comet.evaluate() called......")
         cli = self._make_command_line(args)
         self._log_html(cli)
 

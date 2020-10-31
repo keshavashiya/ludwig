@@ -13,25 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-
 import multiprocessing
 import os
 import random
 import shutil
+import sys
+import traceback
 import unittest
 import uuid
 from distutils.util import strtobool
 
 import cloudpickle
 import pandas as pd
+
 from ludwig.constants import VECTOR
 from ludwig.data.dataset_synthesizer import DATETIME_FORMATS
 from ludwig.data.dataset_synthesizer import build_synthetic_dataset
-from ludwig.experiment import full_experiment
+from ludwig.experiment import experiment_cli
 
 ENCODERS = [
     'embed', 'rnn', 'parallel_cnn', 'cnnrnn', 'stacked_parallel_cnn',
-    'stacked_cnn'
+    'stacked_cnn', 'transformer'
 ]
 
 HF_ENCODERS_SHORT = ['distilbert']
@@ -176,7 +178,8 @@ def sequence_feature(**kwargs):
         'embedding_size': 8,
         'fc_size': 8,
         'state_size': 8,
-        'num_filters': 8
+        'num_filters': 8,
+        'hidden_size': 8
     }
     seq_feature.update(kwargs)
     return seq_feature
@@ -232,7 +235,7 @@ def audio_feature(folder, **kwargs):
             }
         ],
         'fc_size': 256,
-        'audio_dest_folder': folder
+        'destination_folder': folder
     }
     feature.update(kwargs)
     return feature
@@ -303,7 +306,12 @@ def vector_feature(**kwargs):
     return feature
 
 
-def run_experiment(input_features, output_features, **kwargs):
+def run_experiment(
+    input_features,
+    output_features,
+    skip_save_processed_input=True,
+    **kwargs
+):
     """
     Helper method to avoid code repetition in running an experiment. Deletes
     the data saved to disk after running the experiment
@@ -313,11 +321,11 @@ def run_experiment(input_features, output_features, **kwargs):
     arguments
     :return: None
     """
-    model_definition = None
+    config = None
     if input_features is not None and output_features is not None:
         # This if is necessary so that the caller can call with
-        # model_definition_file (and not model_definition)
-        model_definition = {
+        # config_file (and not config)
+        config = {
             'input_features': input_features,
             'output_features': output_features,
             'combiner': {
@@ -328,16 +336,22 @@ def run_experiment(input_features, output_features, **kwargs):
         }
 
     args = {
-        'model_definition': model_definition,
-        'skip_save_processed_input': True,
+        'config': config,
+        'skip_save_training_description': True,
+        'skip_save_training_statistics': True,
+        'skip_save_processed_input': skip_save_processed_input,
         'skip_save_progress': True,
         'skip_save_unprocessed_output': True,
         'skip_save_model': True,
+        'skip_save_predictions': True,
+        'skip_save_eval_stats': True,
+        'skip_collect_predictions': True,
+        'skip_collect_overall_stats': True,
         'skip_save_log': True
     }
     args.update(kwargs)
 
-    exp_dir_name = full_experiment(**args)
+    _, _, _, _, exp_dir_name = experiment_cli(**args)
     shutil.rmtree(exp_dir_name, ignore_errors=True)
 
 
@@ -378,7 +392,11 @@ def generate_output_features_with_dependencies(main_feature, dependencies):
 
 def _subproc_wrapper(fn, queue, *args, **kwargs):
     fn = cloudpickle.loads(fn)
-    results = fn(*args, **kwargs)
+    try:
+        results = fn(*args, **kwargs)
+    except Exception as e:
+        traceback.print_exc(file=sys.stderr)
+        results = e
     queue.put(results)
 
 
@@ -395,6 +413,9 @@ def spawn(fn):
         p.start()
         p.join()
         results = queue.get()
+        if isinstance(results, Exception):
+            raise RuntimeError(f'Spawned subprocess raised {type(results).__name__}, '
+                               f'check log output above for stack trace.')
         return results
 
     return wrapped_fn

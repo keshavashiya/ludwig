@@ -19,8 +19,6 @@ import os
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.losses import MeanAbsoluteError
-from tensorflow.keras.losses import MeanSquaredError
 from tensorflow.keras.metrics import \
     MeanAbsoluteError as MeanAbsoluteErrorMetric
 from tensorflow.keras.metrics import MeanSquaredError as MeanSquaredErrorMetric
@@ -31,55 +29,14 @@ from ludwig.encoders.generic_encoders import PassthroughEncoder, \
     DenseEncoder
 from ludwig.features.base_feature import InputFeature
 from ludwig.features.base_feature import OutputFeature
-from ludwig.globals import is_on_master
-from ludwig.modules.metric_modules import ErrorScore
+from ludwig.modules.loss_modules import MSELoss, MAELoss
+from ludwig.modules.metric_modules import ErrorScore, MAEMetric, MSEMetric
 from ludwig.modules.metric_modules import R2Score
+from ludwig.utils.horovod_utils import is_on_master
 from ludwig.utils.misc_utils import set_default_value
 from ludwig.utils.misc_utils import set_default_values
 
 logger = logging.getLogger(__name__)
-
-
-# TODO TF2 can we eliminate use of these custom wrapper classes?
-# custom class to handle how Ludwig stores predictions
-class MSELoss(MeanSquaredError):
-    def __init__(self, **kwargs):
-        super(MSELoss, self).__init__(**kwargs)
-
-    def __call__(self, y_true, y_pred, sample_weight=None):
-        logits = y_pred[LOGITS]
-        loss = super().__call__(y_true, logits, sample_weight=sample_weight)
-        return loss
-
-
-class MSEMetric(MeanSquaredErrorMetric):
-    def __init__(self, **kwargs):
-        super(MSEMetric, self).__init__(**kwargs)
-
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        super().update_state(
-            y_true, y_pred[PREDICTIONS], sample_weight=sample_weight
-        )
-
-
-class MAELoss(MeanAbsoluteError):
-    def __init__(self, **kwargs):
-        super(MAELoss, self).__init__(**kwargs)
-
-    def __call__(self, y_true, y_pred, sample_weight=None):
-        logits = y_pred[LOGITS]
-        loss = super().__call__(y_true, logits, sample_weight=sample_weight)
-        return loss
-
-
-class MAEMetric(MeanAbsoluteErrorMetric):
-    def __init__(self, **kwargs):
-        super(MAEMetric, self).__init__(**kwargs)
-
-    def update_state(self, y_true, y_pred, sample_weight=None):
-        super().update_state(
-            y_true, y_pred[PREDICTIONS], sample_weight=sample_weight
-        )
 
 
 class NumericalFeatureMixin(object):
@@ -117,22 +74,23 @@ class NumericalFeatureMixin(object):
     def add_feature_data(
             feature,
             dataset_df,
-            data,
+            dataset,
             metadata,
             preprocessing_parameters,
     ):
-        data[feature['name']] = dataset_df[feature['name']].astype(
+        dataset[feature[NAME]] = dataset_df[feature[NAME]].astype(
             np.float32).values
         if preprocessing_parameters['normalization'] is not None:
             if preprocessing_parameters['normalization'] == 'zscore':
-                mean = metadata[feature['name']]['mean']
-                std = metadata[feature['name']]['std']
-                data[feature['name']] = (data[feature['name']] - mean) / std
+                mean = metadata[feature[NAME]]['mean']
+                std = metadata[feature[NAME]]['std']
+                dataset[feature[NAME]] = (dataset[
+                                              feature[NAME]] - mean) / std
             elif preprocessing_parameters['normalization'] == 'minmax':
-                min_ = metadata[feature['name']]['min']
-                max_ = metadata[feature['name']]['max']
-                values = data[feature['name']]
-                data[feature['name']] = (values - min_) / (max_ - min_)
+                min_ = metadata[feature[NAME]]['min']
+                max_ = metadata[feature[NAME]]['max']
+                values = dataset[feature[NAME]]
+                dataset[feature[NAME]] = (values - min_) / (max_ - min_)
 
 
 class NumericalInputFeature(NumericalFeatureMixin, InputFeature):
@@ -165,7 +123,7 @@ class NumericalInputFeature(NumericalFeatureMixin, InputFeature):
         return ()
 
     @staticmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             input_feature,
             feature_metadata,
             *args,
@@ -252,6 +210,7 @@ class NumericalOutputFeature(NumericalFeatureMixin, OutputFeature):
             )
 
     def _setup_metrics(self):
+        self.metric_functions = {}  # needed to shadow class variable
         self.metric_functions[LOSS] = self.eval_loss_function
         self.metric_functions[ERROR] = ErrorScore(name='metric_error')
         self.metric_functions[MEAN_SQUARED_ERROR] = MeanSquaredErrorMetric(
@@ -273,7 +232,7 @@ class NumericalOutputFeature(NumericalFeatureMixin, OutputFeature):
         return ()
 
     @staticmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             output_feature,
             feature_metadata,
             *args,
@@ -283,47 +242,47 @@ class NumericalOutputFeature(NumericalFeatureMixin, OutputFeature):
 
     @staticmethod
     def calculate_overall_stats(
-            test_stats,
-            output_feature,
-            dataset,
-            train_set_metadata
+            predictions,
+            targets,
+            metadata
     ):
-        pass
+        # no overall stats, just return empty dictionary
+        return {}
 
-    @staticmethod
-    def postprocess_results(
-            output_feature,
-            result,
+    def postprocess_predictions(
+            self,
+            predictions,
             metadata,
-            experiment_dir_name,
-            skip_save_unprocessed_output=False,
+            output_directory,
+            skip_save_unprocessed_output=False
     ):
         postprocessed = {}
-        name = output_feature['name']
+        name = self.feature_name
 
         npy_filename = None
         if is_on_master():
-            npy_filename = os.path.join(experiment_dir_name, '{}_{}.npy')
+            npy_filename = os.path.join(output_directory, '{}_{}.npy')
         else:
             skip_save_unprocessed_output = True
 
-        if PREDICTIONS in result and len(result[PREDICTIONS]) > 0:
-            postprocessed[PREDICTIONS] = result[PREDICTIONS].numpy()
+        if PREDICTIONS in predictions and len(predictions[PREDICTIONS]) > 0:
+            postprocessed[PREDICTIONS] = predictions[PREDICTIONS].numpy()
             if not skip_save_unprocessed_output:
                 np.save(
                     npy_filename.format(name, PREDICTIONS),
-                    result[PREDICTIONS]
+                    predictions[PREDICTIONS]
                 )
-            del result[PREDICTIONS]
+            del predictions[PREDICTIONS]
 
-        if PROBABILITIES in result and len(result[PROBABILITIES]) > 0:
-            postprocessed[PROBABILITIES] = result[PROBABILITIES]
+        if PROBABILITIES in predictions and len(
+                predictions[PROBABILITIES]) > 0:
+            postprocessed[PROBABILITIES] = predictions[PROBABILITIES]
             if not skip_save_unprocessed_output:
                 np.save(
                     npy_filename.format(name, PROBABILITIES),
-                    result[PROBABILITIES]
+                    predictions[PROBABILITIES]
                 )
-            del result[PROBABILITIES]
+            del predictions[PROBABILITIES]
 
         return postprocessed
 

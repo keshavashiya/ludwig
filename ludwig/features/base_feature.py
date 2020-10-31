@@ -40,10 +40,10 @@ class BaseFeature(object):
     def __init__(self, feature, *args, **kwargs):
         super().__init__()
 
-        if 'name' not in feature:
+        if NAME not in feature:
             raise ValueError('Missing feature name')
 
-        self.feature_name = feature['name']
+        self.feature_name = feature[NAME]
         self.type = None
 
     def overwrite_defaults(self, feature):
@@ -83,7 +83,7 @@ class InputFeature(BaseFeature, tf.keras.Model, ABC):
 
     @staticmethod
     @abstractmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             input_feature,
             feature_metadata,
             *args,
@@ -225,7 +225,8 @@ class OutputFeature(BaseFeature, tf.keras.Model, ABC):
 
     def call(
             self,
-            inputs,  # ((hidden, other_output_hidden), target) or (hidden, other_output_hidden)
+            inputs,
+            # ((hidden, other_output_hidden), target) or (hidden, other_output_hidden)
             training=None,
             mask=None
     ):
@@ -273,14 +274,31 @@ class OutputFeature(BaseFeature, tf.keras.Model, ABC):
             **logits
         }
 
+    def overall_statistics_metadata(self):
+        """Additional metadata used to extend `training_set_metadata`.
+
+        Used when calculating the overall statistics.
+        """
+        return {}
+
     @property
     @abstractmethod
     def default_validation_metric(self):
         pass
 
+    @abstractmethod
+    def postprocess_predictions(
+            self,
+            result,
+            metadata,
+            output_directory,
+            skip_save_unprocessed_output=False,
+    ):
+        pass
+
     @staticmethod
     @abstractmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             output_feature,
             feature_metadata,
             *args,
@@ -291,21 +309,9 @@ class OutputFeature(BaseFeature, tf.keras.Model, ABC):
     @staticmethod
     @abstractmethod
     def calculate_overall_stats(
-            test_stats,
-            output_feature,
-            dataset,
+            predictions,
+            targets,
             train_set_metadata
-    ):
-        pass
-
-    @staticmethod
-    @abstractmethod
-    def postprocess_results(
-            output_feature,
-            result,
-            metadata,
-            experiment_dir_name,
-            skip_save_unprocessed_output=False,
     ):
         pass
 

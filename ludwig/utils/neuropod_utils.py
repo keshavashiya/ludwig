@@ -1,4 +1,3 @@
-import argparse
 import logging
 import os
 import shutil
@@ -7,12 +6,13 @@ import numpy as np
 
 from ludwig import __file__ as ludwig_path
 from ludwig.api import LudwigModel
-from ludwig.constants import CATEGORY, NUMERICAL, BINARY, SEQUENCE, TEXT, SET, \
-    VECTOR, PREDICTIONS, PROBABILITIES, PROBABILITY
-from ludwig.globals import MODEL_HYPERPARAMETERS_FILE_NAME, \
-    TRAIN_SET_METADATA_FILE_NAME, MODEL_WEIGHTS_FILE_NAME, LUDWIG_VERSION
+from ludwig.constants import (BINARY, CATEGORY, NAME, NUMERICAL, PREDICTIONS,
+                              PROBABILITIES, PROBABILITY, SEQUENCE, SET, TEXT,
+                              TYPE, VECTOR)
+from ludwig.globals import (MODEL_HYPERPARAMETERS_FILE_NAME,
+                            MODEL_WEIGHTS_FILE_NAME,
+                            TRAIN_SET_METADATA_FILE_NAME)
 from ludwig.utils.data_utils import load_json
-from ludwig.utils.print_utils import logging_level_registry, print_ludwig
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +25,13 @@ class LudwigNeuropodModelWrapper:
         data_dict = kwargs
         for key in data_dict:
             data_dict[key] = np.squeeze(data_dict[key], axis=1)
-        predicted = self.ludwig_model.predict(
-            data_dict=data_dict, return_type=dict
+        predicted, _ = self.ludwig_model.predict(
+            dataset=data_dict,
+            return_type=dict
         )
         # print(predicted, file=sys.stderr)
         return postprocess_for_neuropod(
-            predicted, self.ludwig_model.model_definition
+            predicted, self.ludwig_model.config
         )
 
 
@@ -38,11 +39,11 @@ def get_model(data_root):
     return LudwigNeuropodModelWrapper(data_root)
 
 
-def postprocess_for_neuropod(predicted, model_definition):
+def postprocess_for_neuropod(predicted, config):
     postprocessed = {}
-    for output_feature in model_definition['output_features']:
-        feature_name = output_feature['name']
-        feature_type = output_feature['type']
+    for output_feature in config['output_features']:
+        feature_name = output_feature[NAME]
+        feature_type = output_feature[TYPE]
         if feature_type == BINARY:
             postprocessed[feature_name + "_predictions"] = \
                 np.expand_dims(
@@ -106,7 +107,6 @@ def postprocess_for_neuropod(predicted, model_definition):
             postprocessed[feature_name + "_predictions"] = np.expand_dims(
                 np.array(predicted[feature_name][PREDICTIONS], dtype='str'), 1
             )
-    # print(postprocessed, file=sys.stderr)
     return postprocessed
 
 
@@ -155,7 +155,7 @@ def export_neuropod(
 
     logger.debug('data_paths: {}'.format(data_paths))
 
-    ludwig_model_definition = load_json(
+    ludwig_config = load_json(
         os.path.join(
             ludwig_model_path,
             MODEL_HYPERPARAMETERS_FILE_NAME
@@ -169,48 +169,48 @@ def export_neuropod(
     )
 
     input_spec = []
-    for feature in ludwig_model_definition['input_features']:
+    for feature in ludwig_config['input_features']:
         input_spec.append({
-            "name": feature['name'],
+            NAME: feature[NAME],
             "dtype": "str",
             "shape": (None, 1)
         })
     logger.debug('input_spec: {}'.format(input_spec))
 
     output_spec = []
-    for feature in ludwig_model_definition['output_features']:
-        feature_type = feature['type']
-        feature_name = feature['name']
+    for feature in ludwig_config['output_features']:
+        feature_type = feature[TYPE]
+        feature_name = feature[NAME]
         if feature_type == BINARY:
             output_spec.append({
-                "name": feature['name'] + '_predictions',
+                NAME: feature[NAME] + '_predictions',
                 "dtype": "str",
                 "shape": (None, 1)
             })
             output_spec.append({
-                "name": feature['name'] + '_probabilities',
+                NAME: feature[NAME] + '_probabilities',
                 "dtype": "float64",
                 "shape": (None, 1)
             })
         elif feature_type == NUMERICAL:
             output_spec.append({
-                "name": feature['name'] + '_predictions',
+                NAME: feature[NAME] + '_predictions',
                 "dtype": "float64",
                 "shape": (None, 1)
             })
         elif feature_type == CATEGORY:
             output_spec.append({
-                "name": feature['name'] + '_predictions',
+                NAME: feature[NAME] + '_predictions',
                 "dtype": "str",
                 "shape": (None, 1)
             })
             output_spec.append({
-                "name": feature['name'] + '_probability',
+                NAME: feature[NAME] + '_probability',
                 "dtype": "float64",
                 "shape": (None, 1)
             })
             output_spec.append({
-                "name": feature['name'] + '_probabilities',
+                NAME: feature[NAME] + '_probabilities',
                 "dtype": "float64",
                 "shape": (
                     None, training_set_metadata[feature_name]['vocab_size']
@@ -218,29 +218,29 @@ def export_neuropod(
             })
         elif feature_type == SEQUENCE:
             output_spec.append({
-                "name": feature['name'] + '_predictions',
+                NAME: feature[NAME] + '_predictions',
                 "dtype": "str",
                 "shape": (None, 1)
             })
         elif feature_type == TEXT:
             output_spec.append({
-                "name": feature['name'] + '_predictions',
+                NAME: feature[NAME] + '_predictions',
                 "dtype": "str",
                 "shape": (None, 1)
             })
         elif feature_type == SET:
             output_spec.append({
-                "name": feature['name'] + '_predictions',
+                NAME: feature[NAME] + '_predictions',
                 "dtype": "str",
                 "shape": (None, 1)
             })
             output_spec.append({
-                "name": feature['name'] + '_probability',
+                NAME: feature[NAME] + '_probability',
                 "dtype": "str",
                 "shape": (None, 1)
             })
             output_spec.append({
-                "name": feature['name'] + '_probabilities',
+                NAME: feature[NAME] + '_probabilities',
                 "dtype": "float64",
                 "shape": (
                     None, training_set_metadata[feature_name]['vocab_size']
@@ -248,7 +248,7 @@ def export_neuropod(
             })
         elif feature_type == VECTOR:
             output_spec.append({
-                "name": feature['name'] + '_predictions',
+                NAME: feature['name'] + '_predictions',
                 "dtype": "float64",
                 "shape": (
                     None, training_set_metadata[feature_name]['vector_size']
@@ -256,7 +256,7 @@ def export_neuropod(
             })
         else:
             output_spec.append({
-                "name": feature['name'] + '_predictions',
+                NAME: feature['name'] + '_predictions',
                 "dtype": "str",
                 "shape": (None, 1)
             })
@@ -291,63 +291,3 @@ def export_neuropod(
         output_spec=output_spec
     )
     logger.info('Neuropod saved to: {}'.format(neuropod_path))
-
-
-def cli():
-    parser = argparse.ArgumentParser(
-        description='This script exports a Ludwig model in the Neuropod format'
-    )
-
-    # ----------------
-    # Model parameters
-    # ----------------
-    parser.add_argument(
-        '-m',
-        '--ludwig_model_path',
-        help='path to the Ludwig model to export',
-        required=True
-    )
-
-    parser.add_argument(
-        '-l',
-        '--logging_level',
-        default='info',
-        help='the level of logging to use',
-        choices=['critical', 'error', 'warning', 'info', 'debug', 'notset']
-    )
-
-    # -------------------
-    # Neuropod parameters
-    # -------------------
-    parser.add_argument(
-        '-n',
-        '--neuropod_path',
-        help='path of the output Neuropod package file',
-        required=True
-    )
-    parser.add_argument(
-        '-nm',
-        '--neuropod_model_name',
-        help='path of the output Neuropod package file',
-        default='ludwig_model'
-    )
-
-    args = parser.parse_args()
-
-    logging.getLogger('ludwig').setLevel(
-        logging_level_registry[args.logging_level]
-    )
-    global logger
-    logger = logging.getLogger('ludwig.serve')
-
-    print_ludwig('Export Neuropod', LUDWIG_VERSION)
-
-    export_neuropod(
-        args.ludwig_model_path,
-        args.neuropod_path,
-        args.neuropod_model_name,
-    )
-
-
-if __name__ == '__main__':
-    cli()

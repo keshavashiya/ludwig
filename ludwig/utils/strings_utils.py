@@ -35,6 +35,7 @@ SPACE_PUNCTUATION_REGEX = re.compile(r'\w+|[^\w\s]')
 COMMA_REGEX = re.compile(r'\s*,\s*')
 UNDERSCORE_REGEX = re.compile(r'\s*_\s*')
 
+
 def make_safe_filename(s):
     def safe_char(c):
         if c.isalnum():
@@ -51,7 +52,7 @@ def strip_accents(s):
 
 
 def str2bool(v):
-    return v.lower() in ('yes', 'true', 't', '1')
+    return str(v).lower() in ('yes', 'true', 't', '1')
 
 
 def match_replace(string_to_match, list_regex):
@@ -1159,14 +1160,14 @@ class HFTokenizer(BaseTokenizer):
                  **kwargs
                  ):
         super().__init__()
-        from transformers import AutoTokenizer 
+        from transformers import AutoTokenizer
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_name_or_path,
         )
 
     def __call__(self, text):
-        return self.tokenizer.encode(text)
+        return self.tokenizer.encode(text, truncation=True)
 
 
 tokenizer_registry = {

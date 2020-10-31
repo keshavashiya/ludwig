@@ -31,7 +31,6 @@ from ludwig.utils.data_utils import get_abs_path
 from ludwig.utils.image_utils import greyscale
 from ludwig.utils.image_utils import num_channels_in_image
 from ludwig.utils.image_utils import resize_image
-from ludwig.utils.misc_utils import get_from_registry
 from ludwig.utils.misc_utils import set_default_value
 
 logger = logging.getLogger(__name__)
@@ -201,7 +200,7 @@ class ImageFeatureMixin(object):
             width = first_img_width
 
         if NUM_CHANNELS in preprocessing_parameters:
-            # User specified num_channels in the model/feature definition
+            # User specified num_channels in the model/feature config
             user_specified_num_channels = True
             num_channels = preprocessing_parameters[NUM_CHANNELS]
         else:
@@ -225,7 +224,7 @@ class ImageFeatureMixin(object):
     def add_feature_data(
             feature,
             dataset_df,
-            data,
+            dataset,
             metadata,
             preprocessing_parameters
     ):
@@ -239,23 +238,20 @@ class ImageFeatureMixin(object):
             'num_processes',
             preprocessing_parameters['num_processes']
         )
-        csv_path = None
-        if hasattr(dataset_df, 'csv'):
-            csv_path = os.path.dirname(os.path.abspath(dataset_df.csv))
+        src_path = None
+        if hasattr(dataset_df, 'src'):
+            src_path = os.path.dirname(os.path.abspath(dataset_df.src))
 
         num_images = len(dataset_df)
         if num_images == 0:
             raise ValueError('There are no images in the dataset provided.')
 
-        # this is not super nice, but works both and DFs and lists
-        first_path = '.'
-        for first_path in dataset_df[feature['name']]:
-            break
+        first_path = next(iter(dataset_df[feature[NAME]]))
 
-        if csv_path is None and not os.path.isabs(first_path):
+        if src_path is None and not os.path.isabs(first_path):
             raise ValueError('Image file paths must be absolute')
 
-        first_path = get_abs_path(csv_path, first_path)
+        first_path = get_abs_path(src_path, first_path)
 
         (
             should_resize,
@@ -268,9 +264,9 @@ class ImageFeatureMixin(object):
             preprocessing_parameters, first_path
         )
 
-        metadata[feature['name']]['preprocessing']['height'] = height
-        metadata[feature['name']]['preprocessing']['width'] = width
-        metadata[feature['name']]['preprocessing'][
+        metadata[feature[NAME]]['preprocessing']['height'] = height
+        metadata[feature[NAME]]['preprocessing']['width'] = width
+        metadata[feature[NAME]]['preprocessing'][
             'num_channels'] = num_channels
 
         read_image_and_resize = partial(
@@ -282,16 +278,16 @@ class ImageFeatureMixin(object):
             resize_method=preprocessing_parameters['resize_method'],
             user_specified_num_channels=user_specified_num_channels
         )
-        all_file_paths = [get_abs_path(csv_path, file_path)
-                          for file_path in dataset_df[feature['name']]]
+        all_file_paths = [get_abs_path(src_path, file_path)
+                          for file_path in dataset_df[feature[NAME]]]
 
         if feature['preprocessing']['in_memory']:
             # Number of processes to run in parallel for preprocessing
             num_processes = feature['preprocessing']['num_processes']
-            metadata[feature['name']]['preprocessing'][
+            metadata[feature[NAME]]['preprocessing'][
                 'num_processes'] = num_processes
 
-            data[feature['name']] = np.empty(
+            dataset[feature[NAME]] = np.empty(
                 (num_images, height, width, num_channels),
                 dtype=np.uint8
             )
@@ -305,7 +301,7 @@ class ImageFeatureMixin(object):
                             num_processes
                         )
                     )
-                    data[feature['name']] = np.array(
+                    dataset[feature[NAME]] = np.array(
                         pool.map(read_image_and_resize, all_file_paths)
                     )
 
@@ -316,17 +312,17 @@ class ImageFeatureMixin(object):
                     'No process pool initialized. Using one process for preprocessing images'
                 )
                 img = read_image_and_resize(all_file_paths[0])
-                data[feature['name']] = np.array([img])
+                dataset[feature[NAME]] = np.array([img])
         else:
-            data_fp = os.path.splitext(dataset_df.csv)[0] + '.hdf5'
+            data_fp = os.path.splitext(dataset_df.src)[0] + '.hdf5'
             mode = 'w'
             if os.path.isfile(data_fp):
                 mode = 'r+'
 
             with h5py.File(data_fp, mode) as h5_file:
-                # TODO add multiprocessing/multithreading
+                # todo future add multiprocessing/multithreading
                 image_dataset = h5_file.create_dataset(
-                    feature['name'] + '_data',
+                    feature[NAME] + '_data',
                     (num_images, height, width, num_channels),
                     dtype=np.uint8
                 )
@@ -334,8 +330,9 @@ class ImageFeatureMixin(object):
                     image_dataset[i, :height, :width, :] = (
                         read_image_and_resize(filepath)
                     )
+                h5_file.flush()
 
-            data[feature['name']] = np.arange(num_images)
+            dataset[feature[NAME]] = np.arange(num_images)
 
 
 class ImageInputFeature(ImageFeatureMixin, InputFeature):
@@ -356,7 +353,9 @@ class ImageInputFeature(ImageFeatureMixin, InputFeature):
     def call(self, inputs, training=None, mask=None):
         assert isinstance(inputs, tf.Tensor)
         assert inputs.dtype == tf.uint8
-        # assert len(inputs.shape) == 1
+
+        # csting and rescaling
+        inputs = tf.cast(inputs, tf.float32) / 255
 
         inputs_encoded = self.encoder_obj(
             inputs, training=training, mask=mask
@@ -370,44 +369,8 @@ class ImageInputFeature(ImageFeatureMixin, InputFeature):
     def get_input_shape(self):
         return self.height, self.width, self.num_channels
 
-    # keep this here for now until it's refactored
-    def build_input(
-            self,
-            regularizer,
-            dropout,
-            is_training=False,
-            **kwargs
-    ):
-        placeholder = self._get_input_placeholder()
-        logger.debug('  placeholder: {0}'.format(placeholder))
-
-        scaled = get_from_registry(
-            self.scaling,
-            image_scaling_registry
-        )(placeholder)
-        logger.debug('  scaled: {0}'.format(scaled))
-
-        feature_representation, feature_representation_size = self.encoder_obj(
-            placeholder,
-            regularizer,
-            dropout,
-            is_training,
-        )
-        logger.debug(
-            '  feature_representation: {0}'.format(feature_representation)
-        )
-
-        feature_representation = {
-            'name': self.feature_name,
-            'type': self.type,
-            'representation': feature_representation,
-            'size': feature_representation_size,
-            'placeholder': placeholder
-        }
-        return feature_representation
-
     @staticmethod
-    def update_model_definition_with_metadata(
+    def update_config_with_metadata(
             input_feature,
             feature_metadata,
             *args,

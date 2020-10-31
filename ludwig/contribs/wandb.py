@@ -13,10 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-
 import logging
 import os
-
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +38,10 @@ class Wandb():
                 "Ignored --wandb: Please install wandb; see https://docs.wandb.com")
             return None
 
-    def train_model(self, model, *args, **kwargs):
+    def train_model(self, model, config, *args, **kwargs):
         import wandb
         logger.info("wandb.train_model() called...")
-        config = model._hyperparameters.copy()
+        config = config.copy()
         del config["input_features"]
         del config["output_features"]
         wandb.config.update(config)
@@ -53,7 +51,8 @@ class Wandb():
         import wandb
         logger.info("wandb.train_init() called...")
         wandb.init(project=os.getenv("WANDB_PROJECT", experiment_name),
-                   name=model_name, sync_tensorboard=True, dir=output_directory)
+                   name=model_name, sync_tensorboard=True,
+                   dir=output_directory)
         wandb.save(os.path.join(experiment_directory, "*"))
 
     def visualize_figure(self, fig):

@@ -58,7 +58,7 @@ class ConcatCombiner(tf.keras.Model):
 
         self.fc_stack = None
 
-        # todo this may be redundant, check
+        # todo future: this may be redundant, check
         if fc_layers is None and \
                 num_fc_layers is not None:
             fc_layers = []
@@ -148,7 +148,7 @@ class SequenceConcatCombiner(tf.keras.Model):
             for if_name, if_outputs in inputs.items():
                 # todo: when https://github.com/uber/ludwig/issues/810 is closed
                 #       convert following test from using shape to use explicit
-                #       if_outputs['type'] values for sequence features
+                #       if_outputs[TYPE] values for sequence features
                 if len(if_outputs['encoder_output'].shape) == 3:
                     self.main_sequence_feature = if_name
                     break
